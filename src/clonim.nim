@@ -65,14 +65,20 @@ proc main() =
     return
 
   let stem = file.splitFile.name
-  let work = getTempDir() / ("clonim-" & stem & "-" & $getCurrentProcessId())
+  # Nim module names must be identifiers, but .clj filenames are usually
+  # hyphenated; the binary keeps the original stem, the module doesn't.
+  var modName = ""
+  for ch in stem:
+    modName.add (if ch in {'a'..'z', 'A'..'Z', '0'..'9'}: ch else: '_')
+  if modName.len == 0 or modName[0] in {'0'..'9'}: modName = "m" & modName
+  let work = getTempDir() / ("clonim-" & modName & "-" & $getCurrentProcessId())
   createDir(work)
   defer: removeDir(work)
-  let nimFile = work / (stem & ".nim")
+  let nimFile = work / (modName & ".nim")
   writeFile(nimFile, nimSrc)
 
   if outBin.len == 0:
-    outBin = (if cmd == "build": stem else: work / stem)
+    outBin = (if cmd == "build": stem else: work / modName)
   outBin = outBin.absolutePath
 
   var nimCmd = @["nim", "c", "--hints:off", "--warnings:off",

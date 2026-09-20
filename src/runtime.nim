@@ -1,10 +1,60 @@
-## clonim runtime — persistent-ish Clojure values for compiled Nim code.
-import std/[tables, strutils]
+## clonim runtime — persistent Clojure values for compiled Nim code.
+##
+## Vectors are 32-way tries with a tail buffer (Clojure's PersistentVector);
+## maps and sets are HAMTs. Both share structure on update, so `assoc`/`conj`
+## are O(log32 n) and copy a handful of 32-element nodes instead of the whole
+## collection. Maps and sets additionally remember insertion order — every
+## entry carries an `ord` stamp and iteration sorts by it — so printing and
+## `keys`/`vals` stay predictable the way Clojure's small array-maps are.
+import std/[tables, strutils, hashes, bitops, algorithm]
+
+const
+  Bits = 5
+  Width = 1 shl Bits   # 32
+  Mask = Width - 1
+  MaxShift = 30        # beyond this a HAMT runs out of hash bits
 
 type
   Kind* = enum
     kNil, kBool, kInt, kFloat, kStr, kKeyword, kSymbol,
     kList, kVector, kMap, kSet, kFn
+
+  VNode* = ref object
+    ## A trie node: leaves hold values, internal nodes hold children.
+    case leaf*: bool
+    of true: vals*: seq[Value]
+    of false: kids*: seq[VNode]
+
+  PVec* = object
+    cnt*: int          ## total element count
+    shift*: int        ## bit offset of the root level
+    root*: VNode       ## internal node (never nil)
+    tail*: seq[Value]  ## up to 32 trailing elements, not yet in the trie
+
+  MEntry* = object
+    key*, val*: Value
+    ord*: int          ## insertion stamp, for stable iteration order
+
+  MSlotKind* = enum msEntry, msNode
+  MSlot* = object
+    case sk*: MSlotKind
+    of msEntry: e*: MEntry
+    of msNode: node*: MNode
+
+  MNode* = ref object
+    ## Bitmap-indexed node, or — once the hash bits run out — a linear
+    ## collision bucket.
+    case collision*: bool
+    of false:
+      bitmap*: uint32
+      slots*: seq[MSlot]
+    of true:
+      kvs*: seq[MEntry]
+
+  PMap* = object
+    root*: MNode       ## nil when empty
+    cnt*: int
+    nextOrd*: int
 
   Value* = ref object
     case kind*: Kind
@@ -13,8 +63,9 @@ type
     of kInt: i*: int64
     of kFloat: f*: float64
     of kStr, kKeyword, kSymbol: s*: string
-    of kList, kVector, kSet: items*: seq[Value]
-    of kMap: pairs*: seq[(Value, Value)]
+    of kList: xs*: seq[Value]
+    of kVector: vec*: PVec
+    of kMap, kSet: m*: PMap
     of kFn:
       fn*: proc (args: seq[Value]): Value {.closure.}
       name*: string
@@ -25,19 +76,337 @@ let NilV* = Value(kind: kNil)
 let TrueV* = Value(kind: kBool, b: true)
 let FalseV* = Value(kind: kBool, b: false)
 
+proc err*(msg: string) {.noreturn.} = raise newException(CljError, msg)
+
+proc equals*(a, b: Value): bool
+proc hashValue*(v: Value): uint32
+proc prStr*(v: Value): string
+
+# ------------------------------------------------------- persistent vector
+let emptyVNode = VNode(leaf: false, kids: @[])
+
+proc emptyPVec*(): PVec = PVec(cnt: 0, shift: Bits, root: emptyVNode, tail: @[])
+
+proc tailOff(v: PVec): int =
+  if v.cnt < Width: 0 else: ((v.cnt - 1) shr Bits) shl Bits
+
+proc leafFor(v: PVec, i: int): seq[Value] =
+  if i >= tailOff(v): return v.tail
+  var node = v.root
+  var level = v.shift
+  while level > 0:
+    node = node.kids[(i shr level) and Mask]
+    level -= Bits
+  node.vals
+
+proc vecNth*(v: PVec, i: int): Value =
+  if i < 0 or i >= v.cnt: err("Index out of bounds: " & $i)
+  leafFor(v, i)[i and Mask]
+
+proc newPath(level: int, node: VNode): VNode =
+  if level == 0: node
+  else: VNode(leaf: false, kids: @[newPath(level - Bits, node)])
+
+proc pushTail(cnt, level: int, parent, tailNode: VNode): VNode =
+  let subIdx = ((cnt - 1) shr level) and Mask
+  var kids = parent.kids
+  let child =
+    if level == Bits: tailNode
+    elif subIdx < kids.len: pushTail(cnt, level - Bits, kids[subIdx], tailNode)
+    else: newPath(level - Bits, tailNode)
+  if subIdx < kids.len: kids[subIdx] = child
+  else: kids.add child
+  VNode(leaf: false, kids: kids)
+
+proc vecConj*(v: PVec, x: Value): PVec =
+  if v.tail.len < Width:
+    return PVec(cnt: v.cnt + 1, shift: v.shift, root: v.root, tail: v.tail & x)
+  let tailNode = VNode(leaf: true, vals: v.tail)
+  var shift = v.shift
+  var root: VNode
+  if (v.cnt shr Bits) > (1 shl v.shift):  # root overflow: grow a level
+    root = VNode(leaf: false, kids: @[v.root, newPath(v.shift, tailNode)])
+    shift += Bits
+  else:
+    root = pushTail(v.cnt, v.shift, v.root, tailNode)
+  PVec(cnt: v.cnt + 1, shift: shift, root: root, tail: @[x])
+
+proc doAssoc(level: int, node: VNode, i: int, x: Value): VNode =
+  if level == 0:
+    var vals = node.vals
+    vals[i and Mask] = x
+    VNode(leaf: true, vals: vals)
+  else:
+    var kids = node.kids
+    let sub = (i shr level) and Mask
+    kids[sub] = doAssoc(level - Bits, kids[sub], i, x)
+    VNode(leaf: false, kids: kids)
+
+proc vecAssoc*(v: PVec, i: int, x: Value): PVec =
+  if i == v.cnt: return vecConj(v, x)
+  if i < 0 or i > v.cnt: err("Index out of bounds: " & $i)
+  if i >= tailOff(v):
+    var tail = v.tail
+    tail[i - tailOff(v)] = x
+    return PVec(cnt: v.cnt, shift: v.shift, root: v.root, tail: tail)
+  PVec(cnt: v.cnt, shift: v.shift, root: doAssoc(v.shift, v.root, i, x),
+       tail: v.tail)
+
+proc vecToSeq*(v: PVec): seq[Value] =
+  result = newSeqOfCap[Value](v.cnt)
+  var i = 0
+  while i < v.cnt:
+    let leaf = leafFor(v, i)
+    let base = i and not Mask
+    for j in 0 ..< leaf.len:
+      if base + j >= v.cnt: break
+      result.add leaf[j]
+    i = base + leaf.len
+
+proc toPVec*(xs: seq[Value]): PVec =
+  result = emptyPVec()
+  for x in xs: result = vecConj(result, x)
+
+# ----------------------------------------------------------------- hashing
+proc mixHash(a, b: uint32): uint32 =
+  ## Boost-style combine; cheap and good enough for trie index bits.
+  a xor (b + 0x9e3779b9'u32 + (a shl 6) + (a shr 2))
+
+# ---------------------------------------------------------- persistent map
+proc bitPos(h: uint32, shift: int): uint32 = 1'u32 shl ((h shr shift) and Mask)
+proc slotIdx(bitmap, bit: uint32): int = countSetBits(bitmap and (bit - 1))
+
+proc emptyPMap*(): PMap = PMap(root: nil, cnt: 0, nextOrd: 0)
+
+proc mergeEntries(shift: int, h1: uint32, e1: MEntry,
+                  h2: uint32, e2: MEntry): MNode =
+  if shift > MaxShift:
+    return MNode(collision: true, kvs: @[e1, e2])
+  let b1 = bitPos(h1, shift)
+  let b2 = bitPos(h2, shift)
+  if b1 == b2:
+    MNode(collision: false, bitmap: b1,
+          slots: @[MSlot(sk: msNode,
+                         node: mergeEntries(shift + Bits, h1, e1, h2, e2))])
+  elif b1 < b2:
+    MNode(collision: false, bitmap: b1 or b2,
+          slots: @[MSlot(sk: msEntry, e: e1), MSlot(sk: msEntry, e: e2)])
+  else:
+    MNode(collision: false, bitmap: b1 or b2,
+          slots: @[MSlot(sk: msEntry, e: e2), MSlot(sk: msEntry, e: e1)])
+
+proc nodeAssoc(n: MNode, shift: int, h: uint32, k, v: Value, newOrd: int,
+               added: var bool): MNode =
+  if n.collision:
+    for i in 0 ..< n.kvs.len:
+      if equals(n.kvs[i].key, k):
+        var kvs = n.kvs
+        kvs[i].val = v
+        return MNode(collision: true, kvs: kvs)
+    added = true
+    return MNode(collision: true,
+                 kvs: n.kvs & MEntry(key: k, val: v, ord: newOrd))
+  let bit = bitPos(h, shift)
+  let idx = slotIdx(n.bitmap, bit)
+  var slots = n.slots
+  if (n.bitmap and bit) != 0:
+    case slots[idx].sk
+    of msNode:
+      slots[idx] = MSlot(sk: msNode,
+        node: nodeAssoc(slots[idx].node, shift + Bits, h, k, v, newOrd, added))
+    of msEntry:
+      let e = slots[idx].e
+      if equals(e.key, k):
+        slots[idx] = MSlot(sk: msEntry, e: MEntry(key: k, val: v, ord: e.ord))
+      else:
+        added = true
+        slots[idx] = MSlot(sk: msNode,
+          node: mergeEntries(shift + Bits, hashValue(e.key), e, h,
+                             MEntry(key: k, val: v, ord: newOrd)))
+    return MNode(collision: false, bitmap: n.bitmap, slots: slots)
+  added = true
+  slots.insert(MSlot(sk: msEntry, e: MEntry(key: k, val: v, ord: newOrd)), idx)
+  MNode(collision: false, bitmap: n.bitmap or bit, slots: slots)
+
+proc mapAssoc*(m: PMap, k, v: Value): PMap =
+  let h = hashValue(k)
+  var added = false
+  if m.root.isNil:
+    return PMap(root: MNode(collision: false, bitmap: bitPos(h, 0),
+                            slots: @[MSlot(sk: msEntry,
+                                           e: MEntry(key: k, val: v, ord: 0))]),
+                cnt: 1, nextOrd: 1)
+  let root = nodeAssoc(m.root, 0, h, k, v, m.nextOrd, added)
+  PMap(root: root, cnt: m.cnt + (if added: 1 else: 0),
+       nextOrd: m.nextOrd + (if added: 1 else: 0))
+
+proc nodeFind(n: MNode, shift: int, h: uint32, k: Value,
+              found: var bool): Value =
+  if n.isNil: return NilV
+  if n.collision:
+    for e in n.kvs:
+      if equals(e.key, k):
+        found = true
+        return e.val
+    return NilV
+  let bit = bitPos(h, shift)
+  if (n.bitmap and bit) == 0: return NilV
+  let slot = n.slots[slotIdx(n.bitmap, bit)]
+  case slot.sk
+  of msNode: nodeFind(slot.node, shift + Bits, h, k, found)
+  of msEntry:
+    if equals(slot.e.key, k):
+      found = true
+      slot.e.val
+    else: NilV
+
+proc mapGet*(m: PMap, k: Value, dflt: Value): Value =
+  var found = false
+  let v = nodeFind(m.root, 0, hashValue(k), k, found)
+  if found: v else: dflt
+
+proc mapContains*(m: PMap, k: Value): bool =
+  var found = false
+  discard nodeFind(m.root, 0, hashValue(k), k, found)
+  found
+
+proc nodeDissoc(n: MNode, shift: int, h: uint32, k: Value,
+                removed: var bool): MNode =
+  if n.collision:
+    var kvs: seq[MEntry] = @[]
+    for e in n.kvs:
+      if equals(e.key, k): removed = true
+      else: kvs.add e
+    return (if kvs.len == 0: nil else: MNode(collision: true, kvs: kvs))
+  let bit = bitPos(h, shift)
+  if (n.bitmap and bit) == 0: return n
+  let idx = slotIdx(n.bitmap, bit)
+  var slots = n.slots
+  case slots[idx].sk
+  of msNode:
+    let child = nodeDissoc(slots[idx].node, shift + Bits, h, k, removed)
+    if child.isNil:
+      slots.delete(idx)
+      return (if slots.len == 0: nil
+              else: MNode(collision: false, bitmap: n.bitmap and not bit,
+                          slots: slots))
+    slots[idx] = MSlot(sk: msNode, node: child)
+    MNode(collision: false, bitmap: n.bitmap, slots: slots)
+  of msEntry:
+    if not equals(slots[idx].e.key, k): return n
+    removed = true
+    slots.delete(idx)
+    if slots.len == 0: nil
+    else: MNode(collision: false, bitmap: n.bitmap and not bit, slots: slots)
+
+proc mapDissoc*(m: PMap, k: Value): PMap =
+  if m.root.isNil: return m
+  var removed = false
+  let root = nodeDissoc(m.root, 0, hashValue(k), k, removed)
+  if not removed: return m
+  PMap(root: root, cnt: m.cnt - 1, nextOrd: m.nextOrd)
+
+proc collect(n: MNode, acc: var seq[MEntry]) =
+  if n.isNil: return
+  if n.collision:
+    for e in n.kvs: acc.add e
+    return
+  for slot in n.slots:
+    case slot.sk
+    of msEntry: acc.add slot.e
+    of msNode: collect(slot.node, acc)
+
+proc mapEntries*(m: PMap): seq[MEntry] =
+  ## Entries in insertion order.
+  result = newSeqOfCap[MEntry](m.cnt)
+  collect(m.root, result)
+  result.sort(proc (a, b: MEntry): int = cmp(a.ord, b.ord))
+
+proc hashValue*(v: Value): uint32 =
+  if v.isNil: return 0
+  case v.kind
+  of kNil: 0'u32
+  of kBool: (if v.b: 0x9e3779b9'u32 else: 0x85ebca6b'u32)
+  of kInt: uint32(hash(v.i))
+  of kFloat:
+    # ints and floats compare equal across kinds, so they must hash alike
+    if v.f == float64(int64(v.f)): uint32(hash(int64(v.f)))
+    else: uint32(hash(v.f))
+  of kStr: mixHash(1'u32, uint32(hash(v.s)))
+  of kKeyword: mixHash(2'u32, uint32(hash(v.s)))
+  of kSymbol: mixHash(3'u32, uint32(hash(v.s)))
+  of kList, kVector:
+    # lists and vectors are `=` when their elements are, so they hash alike
+    var h = 7'u32
+    for x in (if v.kind == kList: v.xs else: vecToSeq(v.vec)):
+      h = mixHash(h, hashValue(x))
+    h
+  of kSet:
+    var h = 0'u32                       # xor: independent of iteration order
+    for e in mapEntries(v.m): h = h xor hashValue(e.key)
+    h
+  of kMap:
+    var h = 0'u32
+    for e in mapEntries(v.m):
+      h = h xor mixHash(hashValue(e.key), hashValue(e.val))
+    h
+  of kFn: uint32(hash(cast[int](cast[pointer](v))))
+
+# ------------------------------------------------------------ constructors
 proc mkBool*(x: bool): Value = (if x: TrueV else: FalseV)
 proc mkInt*(x: int64): Value = Value(kind: kInt, i: x)
 proc mkFloat*(x: float64): Value = Value(kind: kFloat, f: x)
 proc mkStr*(x: string): Value = Value(kind: kStr, s: x)
 proc mkKeyword*(x: string): Value = Value(kind: kKeyword, s: x)
 proc mkSymbol*(x: string): Value = Value(kind: kSymbol, s: x)
-proc mkList*(xs: seq[Value]): Value = Value(kind: kList, items: xs)
-proc mkVector*(xs: seq[Value]): Value = Value(kind: kVector, items: xs)
-proc mkSet*(xs: seq[Value]): Value
+proc mkList*(xs: seq[Value]): Value = Value(kind: kList, xs: xs)
+proc mkVector*(xs: seq[Value]): Value = Value(kind: kVector, vec: toPVec(xs))
+proc mkVec*(v: PVec): Value = Value(kind: kVector, vec: v)
+proc mkMapOf*(m: PMap): Value = Value(kind: kMap, m: m)
+proc mkSetOf*(m: PMap): Value = Value(kind: kSet, m: m)
+
+proc mkMap*(ps: seq[(Value, Value)]): Value =
+  var m = emptyPMap()
+  for (k, v) in ps: m = mapAssoc(m, k, v)
+  Value(kind: kMap, m: m)
+
+proc mkSet*(xs: seq[Value]): Value =
+  var m = emptyPMap()
+  for x in xs:
+    if not mapContains(m, x): m = mapAssoc(m, x, x)
+  Value(kind: kSet, m: m)
+
 proc mkFn*(name: string, f: proc (args: seq[Value]): Value {.closure.}): Value =
   Value(kind: kFn, fn: f, name: name)
 
-proc err*(msg: string) {.noreturn.} = raise newException(CljError, msg)
+# --------------------------------------------------------------- accessors
+proc items*(v: Value): seq[Value] =
+  ## Elements of any sequential value, in order. O(n) — prefer `count`/`nth`
+  ## when you only need one element.
+  if v.isNil: return @[]
+  case v.kind
+  of kList: v.xs
+  of kVector: vecToSeq(v.vec)
+  of kSet:
+    var r = newSeqOfCap[Value](v.m.cnt)
+    for e in mapEntries(v.m): r.add e.key
+    r
+  else: @[]
+
+proc pairs*(v: Value): seq[(Value, Value)] =
+  if v.isNil or v.kind != kMap: return @[]
+  result = newSeqOfCap[(Value, Value)](v.m.cnt)
+  for e in mapEntries(v.m): result.add (e.key, e.val)
+
+proc count*(v: Value): int =
+  if v.isNil: return 0
+  case v.kind
+  of kNil: 0
+  of kList: v.xs.len
+  of kVector: v.vec.cnt
+  of kMap, kSet: v.m.cnt
+  of kStr: v.s.len
+  else: err("Don't know how to count: " & prStr(v))
 
 proc truthy*(v: Value): bool =
   if v == nil: return false
@@ -54,9 +423,11 @@ proc equals*(a, b: Value): bool =
   if a.kind == kFloat and b.kind == kInt: return a.f == float64(b.i)
   # lists and vectors are sequentially equal in Clojure
   if a.kind in {kList, kVector} and b.kind in {kList, kVector}:
-    if a.items.len != b.items.len: return false
-    for i in 0 ..< a.items.len:
-      if not equals(a.items[i], b.items[i]): return false
+    if count(a) != count(b): return false
+    let xs = items(a)
+    let ys = items(b)
+    for i in 0 ..< xs.len:
+      if not equals(xs[i], ys[i]): return false
     return true
   if a.kind != b.kind: return false
   case a.kind
@@ -66,35 +437,18 @@ proc equals*(a, b: Value): bool =
   of kFloat: a.f == b.f
   of kStr, kKeyword, kSymbol: a.s == b.s
   of kSet:
-    if a.items.len != b.items.len: return false
-    for x in a.items:
-      var found = false
-      for y in b.items:
-        if equals(x, y): found = true; break
-      if not found: return false
+    if a.m.cnt != b.m.cnt: return false
+    for e in mapEntries(a.m):
+      if not mapContains(b.m, e.key): return false
     true
   of kMap:
-    if a.pairs.len != b.pairs.len: return false
-    for (k, v) in a.pairs:
-      var found = false
-      for (k2, v2) in b.pairs:
-        if equals(k, k2):
-          if not equals(v, v2): return false
-          found = true; break
-      if not found: return false
+    if a.m.cnt != b.m.cnt: return false
+    let missing = Value(kind: kKeyword, s: "%clonim-missing")
+    for e in mapEntries(a.m):
+      if not equals(e.val, mapGet(b.m, e.key, missing)): return false
     true
   of kFn: a == b
   of kList, kVector: false  # handled above
-
-proc mkSet*(xs: seq[Value]): Value =
-  var acc: seq[Value] = @[]
-  for x in xs:
-    var dup = false
-    for y in acc:
-      if equals(x, y): dup = true; break
-    if not dup: acc.add x
-  Value(kind: kSet, items: acc)
-
 # ---------------------------------------------------------------- printing
 proc escapeStr(s: string): string =
   result = "\""
@@ -184,19 +538,13 @@ proc call*(f: Value, args: seq[Value]): Value =
     if args.len == 0: err("Wrong number of args to keyword")
     let m = args[0]
     if m.isNil or m.kind != kMap: return NilV
-    for (k, v) in m.pairs:
-      if equals(k, f): return v
-    (if args.len > 1: args[1] else: NilV)
+    mapGet(m.m, f, (if args.len > 1: args[1] else: NilV))
   of kMap:
     if args.len == 0: err("Wrong number of args to map")
-    for (k, v) in f.pairs:
-      if equals(k, args[0]): return v
-    (if args.len > 1: args[1] else: NilV)
+    mapGet(f.m, args[0], (if args.len > 1: args[1] else: NilV))
   of kVector:
     if args.len != 1 or args[0].kind != kInt: err("Vector lookup needs one int")
-    let i = int(args[0].i)
-    if i < 0 or i >= f.items.len: err("Index out of bounds: " & $i)
-    f.items[i]
+    vecNth(f.vec, int(args[0].i))
   else: err("Can't call value of kind " & $f.kind & ": " & prStr(f))
 
 proc argAt*(args: seq[Value], i: int): Value =
@@ -222,9 +570,8 @@ proc toSeq*(v: Value): seq[Value] =
     r
   of kMap:
     var r: seq[Value] = @[]
-    for (k, val) in v.pairs: r.add mkVector(@[k, val])
+    for e in mapEntries(v.m): r.add mkVector(@[e.key, e.val])
     r
   else: err("Don't know how to create seq from: " & prStr(v))
 
-proc mkMap*(ps: seq[(Value, Value)]): Value = Value(kind: kMap, pairs: ps)
 let emptyArgs*: seq[Value] = @[]

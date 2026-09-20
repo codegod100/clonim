@@ -15,13 +15,16 @@ nim c --hints:off -o:bin/clonim src/clonim.nim   # build the compiler
 ./bin/clonim emit  examples/tour.clj    # show the generated Nim
 ```
 
+There is a `justfile` too: `just build`, `just test`, `just bench`,
+`just run <file>`, `just emit <file>`, `just accept` (re-record expectations).
+
 ## Pipeline
 
 | stage | file | what it does |
 |---|---|---|
 | reader | `src/reader.nim` | text → data. Forms *are* runtime values (homoiconic), as in Clojure |
 | analyzer + codegen | `src/compiler.nim` | expands the macro set to core special forms, emits Nim statements |
-| runtime | `src/runtime.nim` | the `Value` tagged union, equality, printing, var cells, `call` |
+| runtime | `src/runtime.nim` | the `Value` tagged union, the persistent vector/map, equality, printing, var cells, `call` |
 | core | `src/core.nim` | ~140 `clojure.core` builtins as Nim closures |
 | driver | `src/clonim.nim` | shells out to `nim c`, times each phase |
 
@@ -41,6 +44,28 @@ resolved in the program prelude, so a call site is a pointer deref rather than a
 hash lookup, while `def` can still rebind it later. Worth ~20% on call-heavy
 code.
 
+**Collections share structure.** Vectors are 32-way tries with a tail buffer
+(Clojure's `PersistentVector`); maps and sets are HAMTs. An `assoc` copies a
+handful of 32-wide nodes and points at the rest of the old value, so it is
+O(log₃₂ n) and the original stays valid — which is what makes the persistent
+part of persistent data structures real rather than a spelling of "copy".
+
+Maps and sets also keep insertion order: each entry carries an `ord` stamp and
+iteration sorts by it, so printing, `keys` and `vals` are deterministic the way
+Clojure's small array-maps are, without giving up hashed lookup.
+
+`examples/persistent-bench.clj` (`just bench`), n = 8000, `-d:release`:
+
+| operation | copy-on-write `seq` | trie / HAMT |
+|---|---:|---:|
+| 8000 × `conj` onto a vector | 489 ms | 29 ms |
+| 8000 × `assoc` onto a map | 448 ms | 64 ms |
+| 8000 × `conj` onto a set | 526 607 ms | 102 ms |
+| 8000 × `get` from a map | 3031 ms | 50 ms |
+
+The set column is the honest shape of the old representation: `conj` rebuilt the
+whole set and re-scanned it for duplicates, so building one was O(n³).
+
 ## What works
 
 `def` `defn` (multi-arity, varargs, docstrings) `fn` (named, self-recursive)
@@ -50,7 +75,7 @@ code.
 Destructuring: sequential `[a b & rest]` and associative `{:keys [x y]}` in `let`.
 
 Data: nil, bool, int, float, string, keyword, symbol, list, vector, map, set —
-with structural equality and Clojure-shaped printing. Atoms, closures, `comp`,
+persistent, with structural equality, hashing, and Clojure-shaped printing. Atoms, closures, `comp`,
 `partial`, `juxt`, the usual seq library, `clojure.string/*`.
 
 ## What doesn't (yet)
@@ -59,8 +84,9 @@ with structural equality and Clojure-shaped printing. Atoms, closures, `comp`,
   macros need the compiler to be able to *evaluate* code at compile time —
   the honest fix is to bootstrap clonim in itself, or embed an interpreter.
 - **Laziness.** `map`/`filter`/`range` are eager. Infinite seqs will hang.
-- **Persistent data structures.** Vectors and maps are copy-on-write `seq`s, so
-  `assoc` is O(n), not O(log₃₂ n). This is the first thing to replace.
+- **Laziness for the seq library.** Most of `core` still materialises a
+  `seq[Value]` on the way in and out, so even with persistent vectors, `map`
+  over a big collection allocates twice.
 - Protocols/records, namespaces (`ns` is parsed and ignored), refs/agents,
   `#()` literals, syntax-quote, transducers, Nim interop.
 

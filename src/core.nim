@@ -43,18 +43,16 @@ proc cmpChain(args: seq[Value], ok: proc (c: int): bool): Value =
 proc getIn(coll, k, dflt: Value): Value =
   if coll.isNil or coll.kind == kNil: return dflt
   case coll.kind
-  of kMap:
-    for (kk, vv) in coll.pairs:
-      if equals(kk, k): return vv
-    dflt
-  of kVector, kList:
+  of kMap: mapGet(coll.m, k, dflt)
+  of kSet: mapGet(coll.m, k, dflt)
+  of kVector:
     if k.kind != kInt: return dflt
     let i = int(k.i)
-    if i < 0 or i >= coll.items.len: dflt else: coll.items[i]
-  of kSet:
-    for x in coll.items:
-      if equals(x, k): return x
-    dflt
+    if i < 0 or i >= coll.vec.cnt: dflt else: vecNth(coll.vec, i)
+  of kList:
+    if k.kind != kInt: return dflt
+    let i = int(k.i)
+    if i < 0 or i >= coll.xs.len: dflt else: coll.xs[i]
   of kStr:
     if k.kind != kInt: return dflt
     let i = int(k.i)
@@ -63,39 +61,29 @@ proc getIn(coll, k, dflt: Value): Value =
 
 proc assocOne(coll, k, v: Value): Value =
   if coll.isNil or coll.kind == kNil:
-    return Value(kind: kMap, pairs: @[(k, v)])
+    return mkMapOf(mapAssoc(emptyPMap(), k, v))
   case coll.kind
-  of kMap:
-    var ps = coll.pairs
-    for i in 0 ..< ps.len:
-      if equals(ps[i][0], k):
-        ps[i] = (k, v)
-        return Value(kind: kMap, pairs: ps)
-    ps.add (k, v)
-    Value(kind: kMap, pairs: ps)
+  of kMap: mkMapOf(mapAssoc(coll.m, k, v))
   of kVector:
     if k.kind != kInt: err("Vector index must be an integer")
-    var xs = coll.items
-    let i = int(k.i)
-    if i == xs.len: xs.add v
-    elif i >= 0 and i < xs.len: xs[i] = v
-    else: err("Index out of bounds: " & $i)
-    mkVector(xs)
+    mkVec(vecAssoc(coll.vec, int(k.i), v))
   else: err("assoc not supported on " & prStr(coll))
 
 proc conjOne(coll, x: Value): Value =
   if coll.isNil or coll.kind == kNil: return mkList(@[x])
   case coll.kind
-  of kVector: mkVector(coll.items & @[x])
-  of kList: mkList(@[x] & coll.items)
-  of kSet: mkSet(coll.items & @[x])
+  of kVector: mkVec(vecConj(coll.vec, x))
+  of kList: mkList(@[x] & coll.xs)
+  of kSet:
+    (if mapContains(coll.m, x): coll else: mkSetOf(mapAssoc(coll.m, x, x)))
   of kMap:
-    if x.kind in {kVector, kList} and x.items.len == 2:
-      assocOne(coll, x.items[0], x.items[1])
+    let xs = items(x)
+    if x.kind in {kVector, kList} and xs.len == 2:
+      assocOne(coll, xs[0], xs[1])
     elif x.kind == kMap:
-      var m = coll
-      for (k, v) in x.pairs: m = assocOne(m, k, v)
-      m
+      var m = coll.m
+      for e in mapEntries(x.m): m = mapAssoc(m, e.key, e.val)
+      mkMapOf(m)
     else: err("conj on map needs a pair")
   else: err("conj not supported on " & prStr(coll))
 
@@ -177,21 +165,14 @@ proc registerCore*() =
   def "coll?", proc (a: seq[Value]): Value =
     mkBool(a[0].kind in {kList, kVector, kMap, kSet})
   def "fn?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kFn)
-  def "empty?", proc (a: seq[Value]): Value = mkBool(toSeq(a[0]).len == 0)
+  def "empty?", proc (a: seq[Value]): Value = mkBool(count(a[0]) == 0)
   def "contains?", proc (a: seq[Value]): Value =
     let c = a[0]
     if c.isNil or c.kind == kNil: return FalseV
     case c.kind
-    of kMap:
-      for (k, _) in c.pairs:
-        if equals(k, a[1]): return TrueV
-      FalseV
-    of kSet:
-      for x in c.items:
-        if equals(x, a[1]): return TrueV
-      FalseV
+    of kMap, kSet: mkBool(mapContains(c.m, a[1]))
     of kVector:
-      mkBool(a[1].kind == kInt and a[1].i >= 0 and a[1].i < c.items.len)
+      mkBool(a[1].kind == kInt and a[1].i >= 0 and a[1].i < c.vec.cnt)
     else: FalseV
 
   # ---- strings / IO
@@ -253,11 +234,11 @@ proc registerCore*() =
   def "list", proc (a: seq[Value]): Value = mkList(a)
   def "vector", proc (a: seq[Value]): Value = mkVector(a)
   def "hash-map", proc (a: seq[Value]): Value =
-    var m: Value = Value(kind: kMap, pairs: @[])
+    var m = emptyPMap()
     var i = 0
     while i + 1 < a.len:
-      m = assocOne(m, a[i], a[i + 1]); i += 2
-    m
+      m = mapAssoc(m, a[i], a[i + 1]); i += 2
+    mkMapOf(m)
   def "hash-set", proc (a: seq[Value]): Value = mkSet(a)
   def "set", proc (a: seq[Value]): Value = mkSet(toSeq(a[0]))
   def "vec", proc (a: seq[Value]): Value = mkVector(toSeq(a[0]))
@@ -266,20 +247,22 @@ proc registerCore*() =
     (if s.len == 0: NilV else: mkList(s))
   def "count", proc (a: seq[Value]): Value =
     if a[0].isNil or a[0].kind == kNil: return mkInt(0)
-    if a[0].kind == kStr: return mkInt(a[0].s.len)
-    if a[0].kind == kMap: return mkInt(a[0].pairs.len)
-    mkInt(toSeq(a[0]).len)
+    mkInt(count(a[0]))
   def "conj", proc (a: seq[Value]): Value =
     result = a[0]
     for i in 1 ..< a.len: result = conjOne(result, a[i])
   def "cons", proc (a: seq[Value]): Value = mkList(@[a[0]] & toSeq(a[1]))
   def "first", proc (a: seq[Value]): Value =
+    if a[0].kind == kVector:
+      return (if a[0].vec.cnt == 0: NilV else: vecNth(a[0].vec, 0))
     let s = toSeq(a[0])
     (if s.len == 0: NilV else: s[0])
   def "second", proc (a: seq[Value]): Value =
     let s = toSeq(a[0])
     (if s.len < 2: NilV else: s[1])
   def "last", proc (a: seq[Value]): Value =
+    if a[0].kind == kVector:
+      return (if a[0].vec.cnt == 0: NilV else: vecNth(a[0].vec, a[0].vec.cnt - 1))
     let s = toSeq(a[0])
     (if s.len == 0: NilV else: s[^1])
   def "rest", proc (a: seq[Value]): Value =
@@ -289,8 +272,13 @@ proc registerCore*() =
     let s = toSeq(a[0])
     (if s.len <= 1: NilV else: mkList(s[1 .. ^1]))
   def "nth", proc (a: seq[Value]): Value =
-    let s = toSeq(a[0])
     let i = int(intOf(a[1]))
+    if a[0].kind == kVector:
+      # O(log32 n) straight through the trie, no intermediate seq
+      if i >= 0 and i < a[0].vec.cnt: return vecNth(a[0].vec, i)
+      if a.len > 2: return a[2]
+      err("Index out of bounds: " & $i)
+    let s = toSeq(a[0])
     if i >= 0 and i < s.len: s[i]
     elif a.len > 2: a[2]
     else: err("Index out of bounds: " & $i)
@@ -307,23 +295,19 @@ proc registerCore*() =
     while i + 1 < a.len:
       result = assocOne(result, a[i], a[i + 1]); i += 2
   def "dissoc", proc (a: seq[Value]): Value =
-    var ps = a[0].pairs
-    for i in 1 ..< a.len:
-      var keep: seq[(Value, Value)] = @[]
-      for (k, v) in ps:
-        if not equals(k, a[i]): keep.add (k, v)
-      ps = keep
-    Value(kind: kMap, pairs: ps)
+    var m = a[0].m
+    for i in 1 ..< a.len: m = mapDissoc(m, a[i])
+    mkMapOf(m)
   def "update", proc (a: seq[Value]): Value =
     let cur = getIn(a[0], a[1], NilV)
     assocOne(a[0], a[1], call(a[2], @[cur] & a[3 .. ^1]))
   def "keys", proc (a: seq[Value]): Value =
     var r: seq[Value] = @[]
-    for (k, _) in a[0].pairs: r.add k
+    for e in mapEntries(a[0].m): r.add e.key
     (if r.len == 0: NilV else: mkList(r))
   def "vals", proc (a: seq[Value]): Value =
     var r: seq[Value] = @[]
-    for (_, v) in a[0].pairs: r.add v
+    for e in mapEntries(a[0].m): r.add e.val
     (if r.len == 0: NilV else: mkList(r))
   def "reverse", proc (a: seq[Value]): Value =
     var s = toSeq(a[0])
@@ -484,18 +468,16 @@ proc registerCore*() =
       r.add x
     mkList(r)
   def "group-by", proc (a: seq[Value]): Value =
-    var m: Value = Value(kind: kMap, pairs: @[])
+    var m = emptyPMap()
     for x in toSeq(a[1]):
       let k = call(a[0], @[x])
-      let cur = getIn(m, k, mkVector(@[]))
-      m = assocOne(m, k, conjOne(cur, x))
-    m
+      m = mapAssoc(m, k, conjOne(mapGet(m, k, mkVector(@[])), x))
+    mkMapOf(m)
   def "frequencies", proc (a: seq[Value]): Value =
-    var m: Value = Value(kind: kMap, pairs: @[])
+    var m = emptyPMap()
     for x in toSeq(a[0]):
-      let cur = getIn(m, x, mkInt(0))
-      m = assocOne(m, x, mkInt(cur.i + 1))
-    m
+      m = mapAssoc(m, x, mkInt(mapGet(m, x, mkInt(0)).i + 1))
+    mkMapOf(m)
   def "identity", proc (a: seq[Value]): Value = a[0]
   def "comp", proc (a: seq[Value]): Value =
     let fs = a

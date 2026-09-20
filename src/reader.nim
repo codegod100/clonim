@@ -110,7 +110,7 @@ proc readForm(r: var Reader): Value =
     var i = 0
     while i < xs.len:
       ps.add (xs[i], xs[i + 1]); i += 2
-    return Value(kind: kMap, pairs: ps)
+    return mkMap(ps)
   of ')', ']', '}':
     r.readerErr("Unmatched delimiter: " & c)
   of '"':
