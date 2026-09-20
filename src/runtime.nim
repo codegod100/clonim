@@ -17,7 +17,7 @@ const
 type
   Kind* = enum
     kNil, kBool, kInt, kFloat, kStr, kKeyword, kSymbol,
-    kList, kVector, kMap, kSet, kFn
+    kList, kVector, kMap, kSet, kCons, kLazy, kFn
 
   VNode* = ref object
     ## A trie node: leaves hold values, internal nodes hold children.
@@ -56,7 +56,8 @@ type
     cnt*: int
     nextOrd*: int
 
-  Value* = ref object
+  Value* = ref ValueObj
+  ValueObj* = object
     case kind*: Kind
     of kNil: discard
     of kBool: b*: bool
@@ -66,11 +67,57 @@ type
     of kList: xs*: seq[Value]
     of kVector: vec*: PVec
     of kMap, kSet: m*: PMap
+    of kCons:
+      head*: Value
+      tl*: Value       ## rest of the seq: a cons, a lazy seq, a coll, or nil
+    of kLazy:
+      thunk*: proc (): Value {.closure.}
+      cached*: Value
+      forced*: bool
     of kFn:
       fn*: proc (args: seq[Value]): Value {.closure.}
       name*: string
 
   CljError* = object of CatchableError
+
+# ------------------------------------------------------------ teardown
+## A realized lazy seq is a chain of `cons -> lazy -> cons -> …` refs, and ARC
+## frees a chain by recursing into it — a million-element seq means a million
+## destructor frames, i.e. a segfault at scope exit. So `kCons`/`kLazy` hand
+## their tail to a worklist instead of letting the field drop inline, and the
+## outermost destructor drains it in a loop. Nothing shared is mutated: a node
+## another seq still holds simply survives with its refcount intact.
+##
+## Defining `=destroy` means the compiler stops generating field teardown for
+## `ValueObj`, so every branch below has to release its own fields.
+
+var pendingFree: seq[Value] = @[]
+var draining = false
+
+proc `=destroy`*(x: var ValueObj) =
+  case x.kind
+  of kStr, kKeyword, kSymbol: `=destroy`(x.s)
+  of kList: `=destroy`(x.xs)
+  of kVector: `=destroy`(x.vec)
+  of kMap, kSet: `=destroy`(x.m)
+  of kFn:
+    `=destroy`(x.fn)
+    `=destroy`(x.name)
+  of kCons:
+    `=destroy`(x.head)
+    if not x.tl.isNil: pendingFree.add x.tl   # +1, outlives the release below
+    `=destroy`(x.tl)
+  of kLazy:
+    `=destroy`(x.thunk)
+    if not x.cached.isNil: pendingFree.add x.cached
+    `=destroy`(x.cached)
+  of kNil, kBool, kInt, kFloat: discard
+  if draining: return
+  draining = true
+  while pendingFree.len > 0:
+    let v = pendingFree.pop()
+    discard v      # dies here: its own tail is queued, not recursed into
+  draining = false
 
 let NilV* = Value(kind: kNil)
 let TrueV* = Value(kind: kBool, b: true)
@@ -81,6 +128,7 @@ proc err*(msg: string) {.noreturn.} = raise newException(CljError, msg)
 proc equals*(a, b: Value): bool
 proc hashValue*(v: Value): uint32
 proc prStr*(v: Value): string
+proc toSeq*(v: Value): seq[Value]
 
 # ------------------------------------------------------- persistent vector
 let emptyVNode = VNode(leaf: false, kids: @[])
@@ -322,36 +370,6 @@ proc mapEntries*(m: PMap): seq[MEntry] =
   collect(m.root, result)
   result.sort(proc (a, b: MEntry): int = cmp(a.ord, b.ord))
 
-proc hashValue*(v: Value): uint32 =
-  if v.isNil: return 0
-  case v.kind
-  of kNil: 0'u32
-  of kBool: (if v.b: 0x9e3779b9'u32 else: 0x85ebca6b'u32)
-  of kInt: uint32(hash(v.i))
-  of kFloat:
-    # ints and floats compare equal across kinds, so they must hash alike
-    if v.f == float64(int64(v.f)): uint32(hash(int64(v.f)))
-    else: uint32(hash(v.f))
-  of kStr: mixHash(1'u32, uint32(hash(v.s)))
-  of kKeyword: mixHash(2'u32, uint32(hash(v.s)))
-  of kSymbol: mixHash(3'u32, uint32(hash(v.s)))
-  of kList, kVector:
-    # lists and vectors are `=` when their elements are, so they hash alike
-    var h = 7'u32
-    for x in (if v.kind == kList: v.xs else: vecToSeq(v.vec)):
-      h = mixHash(h, hashValue(x))
-    h
-  of kSet:
-    var h = 0'u32                       # xor: independent of iteration order
-    for e in mapEntries(v.m): h = h xor hashValue(e.key)
-    h
-  of kMap:
-    var h = 0'u32
-    for e in mapEntries(v.m):
-      h = h xor mixHash(hashValue(e.key), hashValue(e.val))
-    h
-  of kFn: uint32(hash(cast[int](cast[pointer](v))))
-
 # ------------------------------------------------------------ constructors
 proc mkBool*(x: bool): Value = (if x: TrueV else: FalseV)
 proc mkInt*(x: int64): Value = Value(kind: kInt, i: x)
@@ -379,6 +397,131 @@ proc mkSet*(xs: seq[Value]): Value =
 proc mkFn*(name: string, f: proc (args: seq[Value]): Value {.closure.}): Value =
   Value(kind: kFn, fn: f, name: name)
 
+# --------------------------------------------------------------- lazy seqs
+## A lazy seq is a thunk that, when forced, yields either nil/`kNil` (the end)
+## or a cons cell whose tail is usually another lazy seq. Forcing is memoized
+## in place, so each element is computed once no matter how often it is walked.
+## Nothing here recurses per element: `force` loops, and so does every producer
+## in core, which is what keeps `(nth (iterate inc 0) 1000000)` from blowing the
+## stack.
+
+proc mkCons*(h, t: Value): Value = Value(kind: kCons, head: h, tl: t)
+
+proc mkLazy*(f: proc (): Value {.closure.}): Value =
+  Value(kind: kLazy, thunk: f, cached: nil, forced: false)
+
+proc force*(v: Value): Value =
+  ## Realize one step: follow a chain of lazy seqs down to a cons, a concrete
+  ## collection, or the end of the seq.
+  var cur = v
+  while not cur.isNil and cur.kind == kLazy:
+    if not cur.forced:
+      cur.cached = cur.thunk()
+      cur.forced = true
+      cur.thunk = nil       # drop the closure so its captures can be collected
+    cur = cur.cached
+  cur
+
+proc isSeqNode(v: Value): bool =
+  not v.isNil and v.kind in {kCons, kLazy}
+
+type Cursor* = object
+  ## Walks any seqable value without materializing it. Cons/lazy chains are
+  ## followed link by link; concrete collections are indexed.
+  node: Value
+  backing: seq[Value]
+  idx: int
+  isNode: bool
+
+proc cursor*(v: Value): Cursor =
+  ## Forces nothing: a cons/lazy value is walked link by link, and `hasNext`
+  ## is the only thing that ever forces. So building `(take 3 (map f xs))`
+  ## runs `f` zero times until something asks for an element.
+  if v.isNil: return Cursor(isNode: false)
+  if v.kind in {kCons, kLazy, kNil}: Cursor(isNode: true, node: v)
+  else: Cursor(isNode: false, backing: toSeq(v))
+
+proc hasNext*(c: var Cursor): bool =
+  if c.isNode:
+    c.node = force(c.node)
+    not c.node.isNil and c.node.kind == kCons
+  else: c.idx < c.backing.len
+
+proc next*(c: var Cursor): Value =
+  if c.isNode:
+    result = c.node.head
+    c.node = c.node.tl
+  else:
+    result = c.backing[c.idx]
+    inc c.idx
+
+iterator elems*(v: Value): Value =
+  ## The one way to walk a collection in core: works for lists, vectors, maps,
+  ## sets, strings and lazy seqs alike, and never realizes more than it is asked
+  ## for.
+  var c = cursor(v)
+  while hasNext(c): yield next(c)
+
+proc seqFirst*(v: Value): Value =
+  let f = force(v)
+  if f.isNil: return NilV
+  if f.kind == kCons: return f.head
+  var c = cursor(f)
+  (if hasNext(c): next(c) else: NilV)
+
+proc seqRest*(v: Value): Value =
+  ## The rest of a seq, as a seq. Empty is an empty list, never nil — `next`
+  ## is the one that nils out.
+  let f = force(v)
+  if f.isNil or f.kind == kNil: return mkList(@[])
+  if f.kind == kCons: return (if f.tl.isNil: mkList(@[]) else: f.tl)
+  let xs = toSeq(f)
+  (if xs.len <= 1: mkList(@[]) else: mkList(xs[1 .. ^1]))
+
+proc seqIsEmpty*(v: Value): bool =
+  ## O(1) for lazy seqs: forces at most the first element.
+  var c = cursor(v)
+  not hasNext(c)
+
+proc seqDrop*(v: Value, n: int): Value =
+  ## Skip n elements. Used by `& rest` destructuring, so it must not realize
+  ## anything past the n-th link — `(let [[a b & more] (range)] …)` works.
+  result = v
+  var k = n
+  while k > 0:
+    if seqIsEmpty(result): return mkList(@[])
+    result = seqRest(result)
+    dec k
+
+proc hashValue*(v: Value): uint32 =
+  if v.isNil: return 0
+  case v.kind
+  of kNil: 0'u32
+  of kBool: (if v.b: 0x9e3779b9'u32 else: 0x85ebca6b'u32)
+  of kInt: uint32(hash(v.i))
+  of kFloat:
+    # ints and floats compare equal across kinds, so they must hash alike
+    if v.f == float64(int64(v.f)): uint32(hash(int64(v.f)))
+    else: uint32(hash(v.f))
+  of kStr: mixHash(1'u32, uint32(hash(v.s)))
+  of kKeyword: mixHash(2'u32, uint32(hash(v.s)))
+  of kSymbol: mixHash(3'u32, uint32(hash(v.s)))
+  of kList, kVector, kCons, kLazy:
+    # sequentials are `=` when their elements are, so they hash alike
+    var h = 7'u32
+    for x in elems(v): h = mixHash(h, hashValue(x))
+    h
+  of kSet:
+    var h = 0'u32                       # xor: independent of iteration order
+    for e in mapEntries(v.m): h = h xor hashValue(e.key)
+    h
+  of kMap:
+    var h = 0'u32
+    for e in mapEntries(v.m):
+      h = h xor mixHash(hashValue(e.key), hashValue(e.val))
+    h
+  of kFn: uint32(hash(cast[int](cast[pointer](v))))
+
 # --------------------------------------------------------------- accessors
 proc items*(v: Value): seq[Value] =
   ## Elements of any sequential value, in order. O(n) — prefer `count`/`nth`
@@ -390,6 +533,11 @@ proc items*(v: Value): seq[Value] =
   of kSet:
     var r = newSeqOfCap[Value](v.m.cnt)
     for e in mapEntries(v.m): r.add e.key
+    r
+  of kCons, kLazy:
+    var r: seq[Value] = @[]
+    var c = cursor(v)
+    while hasNext(c): r.add next(c)
     r
   else: @[]
 
@@ -406,6 +554,12 @@ proc count*(v: Value): int =
   of kVector: v.vec.cnt
   of kMap, kSet: v.m.cnt
   of kStr: v.s.len
+  of kCons, kLazy:
+    # realizes the whole seq, which is the honest cost of counting one
+    var n = 0
+    var c = cursor(v)
+    while hasNext(c): discard next(c); inc n
+    n
   else: err("Don't know how to count: " & prStr(v))
 
 proc truthy*(v: Value): bool =
@@ -421,14 +575,16 @@ proc equals*(a, b: Value): bool =
   # numeric tower: int and float compare across types
   if a.kind == kInt and b.kind == kFloat: return float64(a.i) == b.f
   if a.kind == kFloat and b.kind == kInt: return a.f == float64(b.i)
-  # lists and vectors are sequentially equal in Clojure
-  if a.kind in {kList, kVector} and b.kind in {kList, kVector}:
-    if count(a) != count(b): return false
-    let xs = items(a)
-    let ys = items(b)
-    for i in 0 ..< xs.len:
-      if not equals(xs[i], ys[i]): return false
-    return true
+  # every sequential thing is `=` to every other with the same elements
+  const Seqs = {kList, kVector, kCons, kLazy}
+  if a.kind in Seqs and b.kind in Seqs:
+    var ca = cursor(a)
+    var cb = cursor(b)
+    while true:
+      let ha = hasNext(ca)
+      if ha != hasNext(cb): return false
+      if not ha: return true
+      if not equals(next(ca), next(cb)): return false
   if a.kind != b.kind: return false
   case a.kind
   of kNil: true
@@ -448,7 +604,7 @@ proc equals*(a, b: Value): bool =
       if not equals(e.val, mapGet(b.m, e.key, missing)): return false
     true
   of kFn: a == b
-  of kList, kVector: false  # handled above
+  of kList, kVector, kCons, kLazy: false  # handled above
 # ---------------------------------------------------------------- printing
 proc escapeStr(s: string): string =
   result = "\""
@@ -475,9 +631,10 @@ proc toStr*(v: Value, readable: bool): string =
   of kStr: (if readable: escapeStr(v.s) else: v.s)
   of kKeyword: ":" & v.s
   of kSymbol: v.s
-  of kList:
+  of kList, kCons, kLazy:
+    # printing a lazy seq realizes it, exactly as in Clojure
     var parts: seq[string] = @[]
-    for x in v.items: parts.add toStr(x, readable)
+    for x in elems(v): parts.add toStr(x, readable)
     "(" & parts.join(" ") & ")"
   of kVector:
     var parts: seq[string] = @[]
@@ -563,7 +720,7 @@ proc toSeq*(v: Value): seq[Value] =
   if v.isNil: return @[]
   case v.kind
   of kNil: @[]
-  of kList, kVector, kSet: v.items
+  of kList, kVector, kSet, kCons, kLazy: v.items
   of kStr:
     var r: seq[Value] = @[]
     for c in v.s: r.add mkStr($c)

@@ -101,6 +101,7 @@ proc quoteLit(v: Value): string =
     var parts: seq[string] = @[]
     for (k, val) in v.pairs: parts.add "(" & quoteLit(k) & ", " & quoteLit(val) & ")"
     "mkMap(@[" & parts.join(", ") & "])"
+  of kCons, kLazy: err("Can't quote a lazy seq")
   of kFn: err("Can't quote a function")
 
 proc emptySeqFix(s: string, elemType: string): string =
@@ -240,8 +241,7 @@ proc genLet(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
         if isSym(p, "&"):
           let restSym = symName(target.items[j + 1])
           let id = c.gensym("l" & mangle(restSym))
-          c.line("var " & id & ": Value = mkList(toSeq(" & v & ")[min(" & $idx &
-                 ", toSeq(" & v & ").len) .. ^1])")
+          c.line("var " & id & ": Value = seqDrop(" & v & ", " & $idx & ")")
           lenv.locals[restSym] = id
           break
         let id = c.gensym("l" & mangle(symName(p)))
@@ -331,6 +331,8 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
       (if parts.len == 0: "newSeq[(Value, Value)]()" else: "@[" & parts.join(", ") & "]") & ")")
   of kFn:
     err("Can't emit a function literal")
+  of kCons, kLazy:
+    err("Can't emit a lazy seq literal")
   of kList:
     if f.items.len == 0:
       c.line(dst & " = mkList(newSeq[Value]())"); return
@@ -514,7 +516,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
         let nm = symName(b.items[0])
         let cv = genExpr(b.items[1], env, c)
         let it = c.gensym("it")
-        c.line("for " & it & " in toSeq(" & cv & "):")
+        c.line("for " & it & " in elems(" & cv & "):")
         c.push
         let benv = newEnv(env)
         let id = c.gensym("l" & mangle(nm))

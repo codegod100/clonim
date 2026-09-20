@@ -26,9 +26,10 @@ emit file: build
 compile file: build
     ./{{bin}} build {{file}}
 
-# Persistent-collection benchmark: conj/assoc/get at scale
+# Benchmarks: persistent-collection writes, and lazy early exit
 bench: release
     ./{{bin}} run examples/persistent-bench.clj -d
+    ./{{bin}} run examples/lazy-bench.clj -d
 
 # Re-record tests/<name>.expected from current output
 accept: build

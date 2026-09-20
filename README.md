@@ -66,6 +66,37 @@ Clojure's small array-maps are, without giving up hashed lookup.
 The set column is the honest shape of the old representation: `conj` rebuilt the
 whole set and re-scanned it for duplicates, so building one was O(n³).
 
+**Seqs are lazy.** `map`, `filter`, `remove`, `range`, `take`, `drop`,
+`take-while`, `drop-while`, `concat`, `map-indexed`, `iterate`, `repeat`,
+`repeatedly` and `cycle` return a chain of thunks: each element is computed on
+first demand and memoized, so infinite seqs are ordinary values and a consumer
+that stops early never pays for the rest.
+
+```clojure
+(take 5 (filter even? (range)))            ;=> (0 2 4 6 8)
+(first (filter odd? (map inc (range 2000000))))   ; 671 ms eager -> 0 ms lazy
+```
+
+Everything in `core` walks collections through one `Cursor`, which follows a
+cons/lazy chain link by link and indexes concrete collections directly, so a
+builtin never materializes more of a seq than it was asked for. `nth`, `first`,
+`rest`, `seq`, `empty?` and `& rest` destructuring all stop at the element they
+need; `count`, `reduce` and printing realize the whole seq, which is what those
+mean.
+
+The cost is the usual one: a fully realized lazy seq allocates a cons cell and
+a thunk per element, where the eager version filled one flat `seq`. Realizing
+all of `(map inc (range 1000000))` went from 290 ms to 570 ms. Clojure buys most
+of that back by realizing in 32-element chunks; clonim does not chunk yet, which
+is why its laziness is exact — `take 3` computes exactly three elements, not
+thirty-two.
+
+Long chains need one piece of care. ARC frees a linked structure by recursing
+into it, so dropping a million-element seq means a million destructor frames and
+a segfault. `Value` therefore has a hand-written `=destroy` that hands a cons or
+lazy tail to a worklist and drains it in a loop. Nothing shared is mutated, so a
+tail another seq still holds simply survives.
+
 ## What works
 
 `def` `defn` (multi-arity, varargs, docstrings) `fn` (named, self-recursive)
@@ -78,15 +109,19 @@ Data: nil, bool, int, float, string, keyword, symbol, list, vector, map, set —
 persistent, with structural equality, hashing, and Clojure-shaped printing. Atoms, closures, `comp`,
 `partial`, `juxt`, the usual seq library, `clojure.string/*`.
 
+Lazy seqs: `iterate` `repeat` `repeatedly` `cycle` `doall` `dorun`, and the seq
+library above returns them where Clojure does.
+
 ## What doesn't (yet)
 
 - **`defmacro`.** The macro set is fixed and expanded by the compiler. User
   macros need the compiler to be able to *evaluate* code at compile time —
   the honest fix is to bootstrap clonim in itself, or embed an interpreter.
-- **Laziness.** `map`/`filter`/`range` are eager. Infinite seqs will hang.
-- **Laziness for the seq library.** Most of `core` still materialises a
-  `seq[Value]` on the way in and out, so even with persistent vectors, `map`
-  over a big collection allocates twice.
+- **Chunked seqs.** Lazy seqs are unchunked, so full realization allocates two
+  cells per element and runs ~2× slower than the old eager path. 32-element
+  chunking is the fix, at the cost of exact demand.
+- **Destructuring in parameter lists.** `(let [[a b] xs] …)` works; `(defn f
+  [[a b]] …)` does not.
 - Protocols/records, namespaces (`ns` is parsed and ignored), refs/agents,
   `#()` literals, syntax-quote, transducers, Nim interop.
 

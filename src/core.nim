@@ -87,6 +87,133 @@ proc conjOne(coll, x: Value): Value =
     else: err("conj on map needs a pair")
   else: err("conj not supported on " & prStr(coll))
 
+# ------------------------------------------------------------- lazy seqs
+## Producers share one shape: capture a Cursor, and return a thunk that
+## advances a *copy* of it, yields one cons cell, and hands the advanced copy
+## to the next thunk. Because each thunk only ever takes one step, an infinite
+## source costs exactly as much as the consumer asks for.
+
+proc lazyOf(c: Cursor): Value =
+  ## The remainder of a cursor, as a lazy seq.
+  let cur = c
+  mkLazy(proc (): Value =
+    var cc = cur
+    if not hasNext(cc): return NilV
+    let x = next(cc)
+    mkCons(x, lazyOf(cc)))
+
+proc lazyMap(f: Value, c: Cursor): Value =
+  let cur = c
+  mkLazy(proc (): Value =
+    var cc = cur
+    if not hasNext(cc): return NilV
+    let x = next(cc)
+    mkCons(call(f, @[x]), lazyMap(f, cc)))
+
+proc lazyMapN(f: Value, cs: seq[Cursor]): Value =
+  let curs = cs
+  mkLazy(proc (): Value =
+    var ccs = curs
+    var args: seq[Value] = @[]
+    for i in 0 ..< ccs.len:
+      if not hasNext(ccs[i]): return NilV    # stop at the shortest
+      args.add next(ccs[i])
+    mkCons(call(f, args), lazyMapN(f, ccs)))
+
+proc lazyMapIndexed(f: Value, i: int64, c: Cursor): Value =
+  let cur = c
+  mkLazy(proc (): Value =
+    var cc = cur
+    if not hasNext(cc): return NilV
+    let x = next(cc)
+    mkCons(call(f, @[mkInt(i), x]), lazyMapIndexed(f, i + 1, cc)))
+
+proc lazyFilter(pred: Value, c: Cursor, keep: bool): Value =
+  let cur = c
+  mkLazy(proc (): Value =
+    var cc = cur
+    while hasNext(cc):
+      let x = next(cc)
+      if truthy(call(pred, @[x])) == keep:
+        return mkCons(x, lazyFilter(pred, cc, keep))
+    NilV)
+
+proc lazyTake(n: int, c: Cursor): Value =
+  if n <= 0: return mkList(@[])
+  let cur = c
+  mkLazy(proc (): Value =
+    var cc = cur
+    if not hasNext(cc): return NilV
+    let x = next(cc)
+    mkCons(x, lazyTake(n - 1, cc)))
+
+proc lazyDrop(n: int, c: Cursor): Value =
+  let cur = c
+  mkLazy(proc (): Value =
+    var cc = cur
+    var k = n
+    while k > 0 and hasNext(cc): discard next(cc); dec k
+    force(lazyOf(cc)))
+
+proc lazyTakeWhile(pred: Value, c: Cursor): Value =
+  let cur = c
+  mkLazy(proc (): Value =
+    var cc = cur
+    if not hasNext(cc): return NilV
+    let x = next(cc)
+    if not truthy(call(pred, @[x])): return NilV
+    mkCons(x, lazyTakeWhile(pred, cc)))
+
+proc lazyDropWhile(pred: Value, c: Cursor): Value =
+  let cur = c
+  mkLazy(proc (): Value =
+    var cc = cur
+    while true:
+      var peek = cc
+      if not hasNext(peek): return NilV
+      let x = next(peek)
+      if not truthy(call(pred, @[x])): return mkCons(x, lazyOf(peek))
+      cc = peek)
+
+proc lazyRange(i, hi, step: int64, bounded: bool): Value =
+  mkLazy(proc (): Value =
+    if bounded and ((step > 0 and i >= hi) or (step < 0 and i <= hi)): return NilV
+    mkCons(mkInt(i), lazyRange(i + step, hi, step, bounded)))
+
+proc lazyIterate(f, x: Value): Value =
+  mkLazy(proc (): Value = mkCons(x, lazyIterate(f, call(f, @[x]))))
+
+proc lazyRepeat(x: Value, n: int64, bounded: bool): Value =
+  mkLazy(proc (): Value =
+    if bounded and n <= 0: return NilV
+    mkCons(x, lazyRepeat(x, n - 1, bounded)))
+
+proc lazyRepeatedly(f: Value, n: int64, bounded: bool): Value =
+  mkLazy(proc (): Value =
+    if bounded and n <= 0: return NilV
+    mkCons(call(f, @[]), lazyRepeatedly(f, n - 1, bounded)))
+
+proc lazyCycle(orig: Value, c: Cursor): Value =
+  let cur = c
+  mkLazy(proc (): Value =
+    var cc = cur
+    if not hasNext(cc):
+      cc = cursor(orig)                      # wrap around
+      if not hasNext(cc): return NilV        # empty source: empty cycle
+    let x = next(cc)
+    mkCons(x, lazyCycle(orig, cc)))
+
+proc lazyConcat(colls: seq[Value], i: int, c: Cursor): Value =
+  let cur = c
+  mkLazy(proc (): Value =
+    var cc = cur
+    var k = i
+    while not hasNext(cc):
+      if k >= colls.len: return NilV
+      cc = cursor(colls[k]); inc k
+    let x = next(cc)
+    mkCons(x, lazyConcat(colls, k, cc)))
+
 proc def(name: string, f: proc (args: seq[Value]): Value {.closure.}) =
   setVar(name, mkFn(name, f))
 
@@ -165,7 +292,7 @@ proc registerCore*() =
   def "coll?", proc (a: seq[Value]): Value =
     mkBool(a[0].kind in {kList, kVector, kMap, kSet})
   def "fn?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kFn)
-  def "empty?", proc (a: seq[Value]): Value = mkBool(count(a[0]) == 0)
+  def "empty?", proc (a: seq[Value]): Value = mkBool(seqIsEmpty(a[0]))
   def "contains?", proc (a: seq[Value]): Value =
     let c = a[0]
     if c.isNil or c.kind == kNil: return FalseV
@@ -221,7 +348,7 @@ proc registerCore*() =
     let sep = (if a.len > 1: str(a[0]) else: "")
     let coll = (if a.len > 1: a[1] else: a[0])
     var parts: seq[string] = @[]
-    for x in toSeq(coll): parts.add str(x)
+    for x in elems(coll): parts.add str(x)
     mkStr(parts.join(sep))
   def "read-line", proc (a: seq[Value]): Value =
     try: mkStr(stdin.readLine()) except CatchableError: NilV
@@ -243,34 +370,29 @@ proc registerCore*() =
   def "set", proc (a: seq[Value]): Value = mkSet(toSeq(a[0]))
   def "vec", proc (a: seq[Value]): Value = mkVector(toSeq(a[0]))
   def "seq", proc (a: seq[Value]): Value =
-    let s = toSeq(a[0])
-    (if s.len == 0: NilV else: mkList(s))
+    # does not realize a lazy seq — just asks whether it has a first element
+    (if seqIsEmpty(a[0]): NilV else: a[0])
   def "count", proc (a: seq[Value]): Value =
     if a[0].isNil or a[0].kind == kNil: return mkInt(0)
     mkInt(count(a[0]))
   def "conj", proc (a: seq[Value]): Value =
     result = a[0]
     for i in 1 ..< a.len: result = conjOne(result, a[i])
-  def "cons", proc (a: seq[Value]): Value = mkList(@[a[0]] & toSeq(a[1]))
+  def "cons", proc (a: seq[Value]): Value = mkCons(a[0], a[1])
   def "first", proc (a: seq[Value]): Value =
     if a[0].kind == kVector:
       return (if a[0].vec.cnt == 0: NilV else: vecNth(a[0].vec, 0))
-    let s = toSeq(a[0])
-    (if s.len == 0: NilV else: s[0])
-  def "second", proc (a: seq[Value]): Value =
-    let s = toSeq(a[0])
-    (if s.len < 2: NilV else: s[1])
+    seqFirst(a[0])
+  def "second", proc (a: seq[Value]): Value = seqFirst(seqRest(a[0]))
   def "last", proc (a: seq[Value]): Value =
     if a[0].kind == kVector:
       return (if a[0].vec.cnt == 0: NilV else: vecNth(a[0].vec, a[0].vec.cnt - 1))
-    let s = toSeq(a[0])
-    (if s.len == 0: NilV else: s[^1])
-  def "rest", proc (a: seq[Value]): Value =
-    let s = toSeq(a[0])
-    (if s.len <= 1: mkList(@[]) else: mkList(s[1 .. ^1]))
+    result = NilV
+    for x in elems(a[0]): result = x
+  def "rest", proc (a: seq[Value]): Value = seqRest(a[0])
   def "next", proc (a: seq[Value]): Value =
-    let s = toSeq(a[0])
-    (if s.len <= 1: NilV else: mkList(s[1 .. ^1]))
+    let r = seqRest(a[0])
+    (if seqIsEmpty(r): NilV else: r)
   def "nth", proc (a: seq[Value]): Value =
     let i = int(intOf(a[1]))
     if a[0].kind == kVector:
@@ -278,9 +400,15 @@ proc registerCore*() =
       if i >= 0 and i < a[0].vec.cnt: return vecNth(a[0].vec, i)
       if a.len > 2: return a[2]
       err("Index out of bounds: " & $i)
-    let s = toSeq(a[0])
-    if i >= 0 and i < s.len: s[i]
-    elif a.len > 2: a[2]
+    if i >= 0:
+      # walks the seq, realizing no more of it than the index demands
+      var k = i
+      var c = cursor(a[0])
+      while hasNext(c):
+        let x = next(c)
+        if k == 0: return x
+        dec k
+    if a.len > 2: a[2]
     else: err("Index out of bounds: " & $i)
   def "get", proc (a: seq[Value]): Value =
     getIn(a[0], a[1], (if a.len > 2: a[2] else: NilV))
@@ -310,7 +438,7 @@ proc registerCore*() =
     for e in mapEntries(a[0].m): r.add e.val
     (if r.len == 0: NilV else: mkList(r))
   def "reverse", proc (a: seq[Value]): Value =
-    var s = toSeq(a[0])
+    let s = toSeq(a[0])
     var r: seq[Value] = @[]
     for i in countdown(s.len - 1, 0): r.add s[i]
     mkList(r)
@@ -322,26 +450,26 @@ proc registerCore*() =
     elif a.len >= 2:
       lo = intOf(a[0]); hi = intOf(a[1])
       if a.len > 2: step = intOf(a[2])
-    var r: seq[Value] = @[]
-    if step > 0:
-      var i = lo
-      while i < hi: r.add mkInt(i); i += step
-    elif step < 0:
-      var i = lo
-      while i > hi: r.add mkInt(i); i += step
-    mkList(r)
+    # (range) with no bound is infinite; everything else stops at hi
+    lazyRange(lo, hi, step, bounded = a.len > 0)
   def "take", proc (a: seq[Value]): Value =
-    let n = int(intOf(a[0]))
-    let s = toSeq(a[1])
-    mkList(s[0 ..< min(n, s.len)])
+    lazyTake(int(intOf(a[0])), cursor(a[1]))
   def "drop", proc (a: seq[Value]): Value =
-    let n = int(intOf(a[0]))
-    let s = toSeq(a[1])
-    (if n >= s.len: mkList(@[]) else: mkList(s[n .. ^1]))
+    lazyDrop(int(intOf(a[0])), cursor(a[1]))
   def "concat", proc (a: seq[Value]): Value =
-    var r: seq[Value] = @[]
-    for x in a: r.add toSeq(x)
-    mkList(r)
+    lazyConcat(a, 0, cursor(NilV))
+  def "iterate", proc (a: seq[Value]): Value = lazyIterate(a[0], a[1])
+  def "repeat", proc (a: seq[Value]): Value =
+    (if a.len == 1: lazyRepeat(a[0], 0, bounded = false)
+     else: lazyRepeat(a[1], intOf(a[0]), bounded = true))
+  def "repeatedly", proc (a: seq[Value]): Value =
+    (if a.len == 1: lazyRepeatedly(a[0], 0, bounded = false)
+     else: lazyRepeatedly(a[1], intOf(a[0]), bounded = true))
+  def "cycle", proc (a: seq[Value]): Value = lazyCycle(a[0], cursor(a[0]))
+  def "doall", proc (a: seq[Value]): Value = mkList(toSeq(a[0]))
+  def "dorun", proc (a: seq[Value]): Value =
+    for x in elems(a[0]): discard
+    NilV
   def "sort", proc (a: seq[Value]): Value =
     var s = toSeq(a[^1])
     let cmpFn = (if a.len > 1: a[0] else: NilV)
@@ -370,7 +498,7 @@ proc registerCore*() =
     mkList(s)
   def "distinct", proc (a: seq[Value]): Value =
     var r: seq[Value] = @[]
-    for x in toSeq(a[0]):
+    for x in elems(a[0]):
       var dup = false
       for y in r:
         if equals(x, y): dup = true; break
@@ -378,7 +506,7 @@ proc registerCore*() =
     mkList(r)
   def "interpose", proc (a: seq[Value]): Value =
     var r: seq[Value] = @[]
-    for x in toSeq(a[1]):
+    for x in elems(a[1]):
       if r.len > 0: r.add a[0]
       r.add x
     mkList(r)
@@ -398,41 +526,20 @@ proc registerCore*() =
     callArgs.add toSeq(a[^1])
     call(a[0], callArgs)
   def "map", proc (a: seq[Value]): Value =
-    let f = a[0]
-    if a.len == 2:
-      var r: seq[Value] = @[]
-      for x in toSeq(a[1]): r.add call(f, @[x])
-      return mkList(r)
-    var colls: seq[seq[Value]] = @[]
-    for i in 1 ..< a.len: colls.add toSeq(a[i])
-    var n = colls[0].len
-    for c in colls: n = min(n, c.len)
-    var r: seq[Value] = @[]
-    for i in 0 ..< n:
-      var args: seq[Value] = @[]
-      for c in colls: args.add c[i]
-      r.add call(f, args)
-    mkList(r)
+    if a.len == 2: return lazyMap(a[0], cursor(a[1]))
+    var cs: seq[Cursor] = @[]
+    for i in 1 ..< a.len: cs.add cursor(a[i])
+    lazyMapN(a[0], cs)
   def "mapv", proc (a: seq[Value]): Value =
     var r: seq[Value] = @[]
-    for x in toSeq(a[1]): r.add call(a[0], @[x])
+    for x in elems(a[1]): r.add call(a[0], @[x])
     mkVector(r)
   def "map-indexed", proc (a: seq[Value]): Value =
-    var r: seq[Value] = @[]
-    var i = 0
-    for x in toSeq(a[1]):
-      r.add call(a[0], @[mkInt(i), x]); inc i
-    mkList(r)
+    lazyMapIndexed(a[0], 0, cursor(a[1]))
   def "filter", proc (a: seq[Value]): Value =
-    var r: seq[Value] = @[]
-    for x in toSeq(a[1]):
-      if truthy(call(a[0], @[x])): r.add x
-    mkList(r)
+    lazyFilter(a[0], cursor(a[1]), keep = true)
   def "remove", proc (a: seq[Value]): Value =
-    var r: seq[Value] = @[]
-    for x in toSeq(a[1]):
-      if not truthy(call(a[0], @[x])): r.add x
-    mkList(r)
+    lazyFilter(a[0], cursor(a[1]), keep = false)
   def "reduce", proc (a: seq[Value]): Value =
     let f = a[0]
     if a.len == 2:
@@ -442,40 +549,30 @@ proc registerCore*() =
       for i in 1 ..< s.len: acc = call(f, @[acc, s[i]])
       return acc
     var acc = a[1]
-    for x in toSeq(a[2]): acc = call(f, @[acc, x])
+    for x in elems(a[2]): acc = call(f, @[acc, x])
     acc
   def "some", proc (a: seq[Value]): Value =
-    for x in toSeq(a[1]):
+    for x in elems(a[1]):
       let r = call(a[0], @[x])
       if truthy(r): return r
     NilV
   def "every?", proc (a: seq[Value]): Value =
-    for x in toSeq(a[1]):
+    for x in elems(a[1]):
       if not truthy(call(a[0], @[x])): return FalseV
     TrueV
   def "take-while", proc (a: seq[Value]): Value =
-    var r: seq[Value] = @[]
-    for x in toSeq(a[1]):
-      if not truthy(call(a[0], @[x])): break
-      r.add x
-    mkList(r)
+    lazyTakeWhile(a[0], cursor(a[1]))
   def "drop-while", proc (a: seq[Value]): Value =
-    var r: seq[Value] = @[]
-    var dropping = true
-    for x in toSeq(a[1]):
-      if dropping and truthy(call(a[0], @[x])): continue
-      dropping = false
-      r.add x
-    mkList(r)
+    lazyDropWhile(a[0], cursor(a[1]))
   def "group-by", proc (a: seq[Value]): Value =
     var m = emptyPMap()
-    for x in toSeq(a[1]):
+    for x in elems(a[1]):
       let k = call(a[0], @[x])
       m = mapAssoc(m, k, conjOne(mapGet(m, k, mkVector(@[])), x))
     mkMapOf(m)
   def "frequencies", proc (a: seq[Value]): Value =
     var m = emptyPMap()
-    for x in toSeq(a[0]):
+    for x in elems(a[0]):
       m = mapAssoc(m, x, mkInt(mapGet(m, x, mkInt(0)).i + 1))
     mkMapOf(m)
   def "identity", proc (a: seq[Value]): Value = a[0]
