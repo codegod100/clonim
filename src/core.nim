@@ -419,6 +419,35 @@ proc registerCore*() =
     var r = irem(x, y)
     if r != 0 and ((r < 0) != (y < 0)): r += y
     mkInt(r)
+  # ---- bitwise (int64, JVM semantics: shift counts mask to 0..63)
+  def "bit-and", proc (a: openArray[Value]): Value =
+    result = mkInt(intOf(a[0]))
+    for i in 1 ..< a.len: result = mkInt(result.i and intOf(a[i]))
+  def "bit-or", proc (a: openArray[Value]): Value =
+    result = mkInt(intOf(a[0]))
+    for i in 1 ..< a.len: result = mkInt(result.i or intOf(a[i]))
+  def "bit-xor", proc (a: openArray[Value]): Value =
+    result = mkInt(intOf(a[0]))
+    for i in 1 ..< a.len: result = mkInt(result.i xor intOf(a[i]))
+  def "bit-and-not", proc (a: openArray[Value]): Value =
+    result = mkInt(intOf(a[0]))
+    for i in 1 ..< a.len: result = mkInt(result.i and not intOf(a[i]))
+  def "bit-not", proc (a: openArray[Value]): Value = mkInt(not intOf(a[0]))
+  def "bit-shift-left", proc (a: openArray[Value]): Value =
+    mkInt(intOf(a[0]) shl (intOf(a[1]) and 63))
+  def "bit-shift-right", proc (a: openArray[Value]): Value =
+    # arithmetic: the sign bit is replicated, as on the JVM
+    mkInt(ashr(intOf(a[0]), intOf(a[1]) and 63))
+  def "unsigned-bit-shift-right", proc (a: openArray[Value]): Value =
+    mkInt(cast[int64](cast[uint64](intOf(a[0])) shr uint64(intOf(a[1]) and 63)))
+  def "bit-test", proc (a: openArray[Value]): Value =
+    mkBool((ashr(intOf(a[0]), intOf(a[1]) and 63) and 1) != 0)
+  def "bit-set", proc (a: openArray[Value]): Value =
+    mkInt(intOf(a[0]) or (1'i64 shl (intOf(a[1]) and 63)))
+  def "bit-clear", proc (a: openArray[Value]): Value =
+    mkInt(intOf(a[0]) and not (1'i64 shl (intOf(a[1]) and 63)))
+  def "bit-flip", proc (a: openArray[Value]): Value =
+    mkInt(intOf(a[0]) xor (1'i64 shl (intOf(a[1]) and 63)))
   def "inc", proc (a: openArray[Value]): Value =
     (if a[0].kind == kFloat: mkFloat(a[0].f + 1.0) else: mkInt(a[0].i + 1))
   def "dec", proc (a: openArray[Value]): Value =
