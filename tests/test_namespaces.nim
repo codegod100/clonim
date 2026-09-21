@@ -28,6 +28,10 @@ suite "static namespace resolution":
     check forms[0].kind == kStr
     check forms[0].s == "(?i)^did:[a-z0-9]+:"
 
+  test "host namespaces resolve without placeholder source files":
+    checkForms("(ns user (:require [clojure.string :as str])) (str/trim \" hi \")",
+      "(clojure.string/trim \" hi \")")
+
   test "definitions resolve sequentially, including core shadowing":
     checkForms("(inc 1) (def inc (fn [x] x)) (inc 2)",
       "(clojure.core/inc 1) (def user/inc (fn [x] x)) (user/inc 2)")

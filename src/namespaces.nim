@@ -16,7 +16,7 @@ type
     defs, privateDefs, required: HashSet[string]
   Resolver = ref object
     roots: seq[string]
-    cores: HashSet[string]
+    cores, hosts: HashSet[string]
     spaces: Table[string, Namespace]
     active: seq[string]
     loaded: HashSet[string]
@@ -64,6 +64,22 @@ proc registeredCoreNames(): HashSet[string] =
   finally:
     globals = saved
 
+proc registeredHostNames(): HashSet[string] =
+  ## Runtime functions in named host namespaces (for example clojure.string)
+  ## do not need a shadow source file merely to be required by user code.
+  let saved = globals
+  globals = initTable[string, VarCell]()
+  try:
+    registerCore()
+    for name, cell in globals:
+      if cell.bound: result.incl name
+  finally:
+    globals = saved
+
+proc hasHostNamespace(r: Resolver, name: string): bool =
+  for candidate in r.hosts:
+    if candidate.startsWith(name & "/"): return true
+
 proc registerNamespaceCore*() =
   ## Call after registerCore in the generated program, before resolving cells.
   ## Both spellings share a cell, so rebinding remains coherent.
@@ -85,6 +101,7 @@ proc checkVar(r: Resolver, ns: Namespace, target, name: string,
     fail("no definition " & canonical)
   if target != ns.name and target notin ns.required:
     fail("namespace " & target & " is not required by " & ns.name)
+  if canonical in r.hosts: return
   if not r.spaces.hasKey(target) or name notin r.spaces[target].defs:
     fail("no definition " & canonical)
   if target != ns.name and name in r.spaces[target].privateDefs:
@@ -299,6 +316,10 @@ proc process(r: Resolver, forms: seq[Value], expected = "")
 proc load(r: Resolver, name: string) =
   validNamespace(name)
   if name == "clojure.core": return
+  if r.hasHostNamespace(name):
+    discard r.space(name)
+    r.loaded.incl name
+    return
   if name in r.active: fail("dependency cycle: " & (r.active & @[name]).join(" -> "))
   if name in r.loaded: return
   let relative = name.replace('.', '/').replace('-', '_')
@@ -410,6 +431,7 @@ proc resolveSource*(src: string, sourceRoots: seq[string]): seq[Value] =
   ## Forward references require declare. Qualified references require a direct
   ## require, except for the current namespace and implicit clojure.core.
   ## Unknown and externally private vars are rejected during analysis.
-  let r = Resolver(roots: sourceRoots, cores: registeredCoreNames())
+  let r = Resolver(roots: sourceRoots, cores: registeredCoreNames(),
+                   hosts: registeredHostNames())
   r.process(readAll(src))
   r.output
