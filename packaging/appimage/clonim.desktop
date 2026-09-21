@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=clonim
+Comment=Clojure compiler hosted on Nim
+Exec=clonim
+Icon=clonim
+Terminal=true
+Categories=Development;

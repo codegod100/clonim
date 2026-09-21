@@ -24,11 +24,9 @@ and a clean working tree. Use `just bench-store 15` to change the threshold;
 see [benchmark history](bench/README.md) for metrics and exit codes.
 
 `just release` builds the compiler and its private static runtime. Version tags
-matching `v*` trigger the release workflow, which publishes the Linux x86_64
-compiler and `libclonim_runtime.a` as individual assets (plus `SHA256SUMS`). Put
-the compiler and archive in the same directory. Generated programs statically
-link the runtime and are standalone; users still need Nim installed as the
-native-code backend.
+matching `v*` trigger the release workflow, which packages both into a single
+Linux x86_64 AppImage. Generated programs statically link the runtime and are
+standalone; users still need Nim installed as the native-code backend.
 
 Source-level libraries are loaded explicitly. Use
 `(require '[clonim.core :refer [now-ms]])` to load `stdlib/clonim/core.clj`. Host-dependent operations remain small runtime primitives; for

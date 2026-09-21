@@ -74,19 +74,31 @@ jobs:
 
       - name: Package release
         run: |
-          install -Dm755 bin/clonim dist/clonim-linux-x86_64
-          install -Dm644 lib/libclonim_runtime.a dist/libclonim_runtime.a
-          cd dist
-          sha256sum clonim-linux-x86_64 libclonim_runtime.a > SHA256SUMS
+          appdir=dist/clonim.AppDir
+          install -Dm755 bin/clonim "$appdir/usr/bin/clonim"
+          install -Dm644 lib/libclonim_runtime.a \
+            "$appdir/usr/bin/libclonim_runtime.a"
+          install -Dm644 packaging/appimage/clonim.desktop \
+            "$appdir/clonim.desktop"
+          install -Dm644 packaging/appimage/clonim.svg "$appdir/clonim.svg"
+          ln -s usr/bin/clonim "$appdir/AppRun"
+          ln -s clonim.svg "$appdir/.DirIcon"
+
+          curl --fail --location --silent --show-error \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage \
+            -o /tmp/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool-x86_64.AppImage" \
+            | sha256sum --check
+          chmod +x /tmp/appimagetool-x86_64.AppImage
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 \
+            /tmp/appimagetool-x86_64.AppImage \
+            "$appdir" dist/clonim-linux-x86_64.AppImage
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: clonim-${{ steps.release.outputs.tag }}-linux-x86_64
-          path: |
-            dist/clonim-linux-x86_64
-            dist/libclonim_runtime.a
-            dist/SHA256SUMS
+          path: dist/clonim-linux-x86_64.AppImage
           if-no-files-found: error
           retention-days: 90
 
@@ -98,13 +110,11 @@ jobs:
           body: |
             Linux x86_64 release of clonim.
 
-            Download `clonim-linux-x86_64` and `libclonim_runtime.a` into the
-            same directory. Generated programs statically link the runtime and
-            are standalone. Nim must be installed as the native-code backend.
+            Download the AppImage, make it executable, and run it. It contains
+            both the compiler and its private static runtime. Generated programs
+            statically link the runtime and are standalone. Nim must be installed
+            as the native-code backend.
           draft: false
           prerelease: false
-          files: |
-            dist/clonim-linux-x86_64
-            dist/libclonim_runtime.a
-            dist/SHA256SUMS
+          files: dist/clonim-linux-x86_64.AppImage
           fail_on_unmatched_files: true
