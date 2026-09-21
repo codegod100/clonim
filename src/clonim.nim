@@ -203,7 +203,13 @@ proc main() =
     nimCmd.add "--passL:-Wl,--allow-multiple-definition"
     nimCmd.add "--passL:" & rtLib
   nimCmd.add "--passL:-lm"
-  if release: nimCmd.add "-d:release"
+  if release:
+    # `-d:release` disables Nim runtime checks but keeps DWARF and symbol
+    # tables by default. Native deliverables should not carry that metadata.
+    nimCmd.add "-d:release"
+    # Nim 2.x has no `--strip` switch; pass the portable linker option through
+    # instead. Zig cc (the bundled linker) and GNU-compatible linkers accept it.
+    nimCmd.add "--passL:-s"
   nimCmd.add nimFile
   if verbose and not cached: echo "clonim: " & nimCmd.join(" ")
 
