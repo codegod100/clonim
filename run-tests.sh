@@ -12,7 +12,12 @@ for f in examples/*.clj; do
   if [ "$got" = "$(cat "$exp")" ]; then
     echo "ok   $name"
   else
-    echo "FAIL $name"; diff <(echo "$got") "$exp" | head -20; fail=1
+    got_file=$(mktemp)
+    printf '%s\n' "$got" > "$got_file"
+    echo "FAIL $name"
+    diff -u "$exp" "$got_file" | head -20
+    rm -f "$got_file"
+    fail=1
   fi
 done
 exit $fail

@@ -74,10 +74,11 @@ jobs:
         run: |
           appdir=dist/clonim.AppDir
           install -Dm755 bin/clonim "$appdir/usr/bin/clonim"
-          nim_bin=$(readlink -f "$(command -v nim)")
-          nim_root=$(dirname "$(dirname "$nim_bin")")
+          nim_lib=$(nim dump --hints:off | tail -n 1)
+          nim_root=$(dirname "$nim_lib")
+          nim_bin="$nim_root/bin/nim"
           install -Dm755 "$nim_bin" "$appdir/usr/bin/nim"
-          cp -a "$nim_root/lib/." "$appdir/usr/lib/"
+          cp -a "$nim_lib/." "$appdir/usr/lib/"
           cp -a "$nim_root/config" "$appdir/usr/config"
           install -Dm755 packaging/appimage/gcc "$appdir/usr/bin/gcc"
           ln -s gcc "$appdir/usr/bin/cc"
