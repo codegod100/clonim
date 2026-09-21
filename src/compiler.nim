@@ -143,7 +143,7 @@ const specialHeads = ["quote", "if", "do", "let", "let*", "loop", "loop*",
   "recur", "fn", "fn*", "def", "defn", "defn-", "defmacro", "and", "or",
   "when", "when-not", "if-not", "cond", "when-let", "if-let", "->", "->>",
   "doseq", "dotimes", "try", "comment", "ns", "require", "in-ns", "use",
-  "import", "set!", "declare"].toHashSet
+  "import", "set!", "declare", "binding"].toHashSet
 
 const intOps = {"+": "+", "-": "-", "*": "*"}.toTable
 const intCalls = {"quot": "idiv", "rem": "irem"}.toTable
@@ -1090,6 +1090,31 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
         genBody(args[1 .. ^1], throwaway, benv, c)
         c.pop
         c.line(dst & " = NilV")
+        return
+      of "binding":
+        # Dynamic scope: the vars keep their new values for the duration of
+        # the body, on every path out of it.
+        let b = args[0]
+        if b.kind != kVector or b.items.len mod 2 != 0:
+          err("binding requires paired bindings")
+        var saved: seq[(string, string)] = @[]
+        var i = 0
+        while i < b.items.len:
+          let nm = symName(b.items[i])
+          let v = genExpr(b.items[i + 1], env, c)
+          let cell = c.cellFor(nm)
+          let keep = c.gensym("bind")
+          c.line("var " & keep & ": Value = cellGet(" & cell & ")")
+          c.line("setVar(" & nimStr(nm) & ", " & v & ")")
+          saved.add (nm, keep)
+          i += 2
+        c.line("try:")
+        c.push; genBody(args[1 .. ^1], dst, env, c); c.pop
+        c.line("finally:")
+        c.push
+        for (nm, keep) in saved:
+          c.line("setVar(" & nimStr(nm) & ", " & keep & ")")
+        c.pop
         return
       of "try":
         var bodyForms: seq[Value] = @[]

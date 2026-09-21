@@ -21,11 +21,13 @@ type
     active: seq[string]
     loaded: HashSet[string]
     output: seq[Value]
+    gensym: int
 
 const syntaxHeads = ["quote", "if", "do", "let", "let*", "loop", "loop*",
   "recur", "fn", "fn*", "def", "defn", "defn-", "defmacro", "and", "or",
   "when", "when-not", "if-not", "cond", "when-let", "if-let", "->", "->>",
-  "doseq", "dotimes", "try", "catch", "finally", "comment", "set!", "declare"]
+  "doseq", "dotimes", "try", "catch", "finally", "comment", "set!", "declare",
+  "case", "for", "with-open", "assert", "binding"]
 
 # Unlike macros, these heads cannot be shadowed in operator position.
 const specialForms = ["quote", "if", "do", "let*", "loop*", "recur", "fn*",
@@ -289,6 +291,66 @@ proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value 
     scope.incl simple(xs[2], "catch binding")
     for i in 3 ..< xs.len: xs[i] = r.walk(ns, xs[i], scope)
     return mkList(xs)
+  of "case":
+    # (case e test-constant result ... default?) — the constants are literal,
+    # so they are quoted rather than resolved.
+    if xs.len < 3: fail("case requires an expression and at least one clause")
+    inc r.gensym
+    let sym = mkSymbol("case__" & $r.gensym)
+    var clauses: seq[Value] = @[]
+    var i = 2
+    while i + 1 < xs.len:
+      let test = xs[i]
+      var pred: Value
+      if test.kind in {kList, kVector} and test.items.len > 0:
+        # a group of constants shares one result
+        var alts: seq[Value] = @[mkSymbol("or")]
+        for t in test.items:
+          alts.add mkList(@[mkSymbol("="), sym, mkList(@[mkSymbol("quote"), t])])
+        pred = mkList(alts)
+      else:
+        pred = mkList(@[mkSymbol("="), sym, mkList(@[mkSymbol("quote"), test])])
+      clauses.add pred
+      clauses.add xs[i + 1]
+      i += 2
+    clauses.add mkSymbol("else")
+    if i < xs.len: clauses.add xs[i]
+    else:
+      clauses.add mkList(@[mkSymbol("throw"),
+                           mkList(@[mkSymbol("str"), mkStr("No matching clause: "), sym])])
+    return r.walk(ns, mkList(@[mkSymbol("let"), mkVector(@[sym, xs[1]]),
+                               mkList(@[mkSymbol("cond")] & clauses)]), locals)
+  of "for":
+    # A comprehension over one or more bindings, without the modifier clauses.
+    if xs.len < 3 or xs[1].kind != kVector: fail("for requires [sym coll] bindings")
+    var bs = xs[1].items
+    if bs.len == 0 or bs.len mod 2 != 0: fail("for requires paired bindings")
+    for j in countup(0, bs.len - 1, 2):
+      if bs[j].kind == kKeyword: fail("for modifier clauses are not supported: " & prStr(bs[j]))
+    var body = mkList(@[mkSymbol("do")] & xs[2 .. ^1])
+    var j = bs.len - 2
+    while j >= 0:
+      let combine = (if j == bs.len - 2: "map" else: "mapcat")
+      body = mkList(@[mkSymbol(combine),
+                      mkList(@[mkSymbol("fn"), mkVector(@[bs[j]]), body]),
+                      bs[j + 1]])
+      j -= 2
+    return r.walk(ns, body, locals)
+  of "with-open":
+    if xs.len < 2 or xs[1].kind != kVector or xs[1].items.len != 2:
+      fail("with-open requires [sym resource]")
+    let bs = xs[1].items
+    let body = mkList(@[mkSymbol("do")] & xs[2 .. ^1])
+    let cleanup = mkList(@[mkSymbol("finally"), mkList(@[mkSymbol(".close"), bs[0]])])
+    return r.walk(ns, mkList(@[mkSymbol("let"), mkVector(bs),
+                               mkList(@[mkSymbol("try"), body, cleanup])]), locals)
+  of "assert":
+    if xs.len < 2: fail("assert requires a test")
+    var msg = mkList(@[mkSymbol("str"), mkStr("Assert failed: " & prStr(xs[1]))])
+    if xs.len > 2:
+      msg = mkList(@[mkSymbol("str"), mkStr("Assert failed: "), xs[2]])
+    return r.walk(ns, mkList(@[mkSymbol("when-not"), xs[1],
+                               mkList(@[mkSymbol("throw"), msg])]), locals)
   of "->", "->>":
     # Expand before resolving: a bare step can be a syntax head (e.g. do).
     if xs.len < 2: fail(h & " requires an expression")

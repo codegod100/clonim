@@ -338,6 +338,10 @@ proc lazyConcat(colls: seq[Value], i: int, c: Cursor): Value =
 proc def(name: string, f: proc (args: openArray[Value]): Value {.closure.}) =
   setVar(name, mkFn(name, f))
 
+proc def(name: string, v: Value) =
+  ## A var whose value is data rather than a function, such as *out*.
+  setVar(name, v)
+
 # ----------------------------------------------------------------- fusion
 ## A pipeline whose intermediate sequences are syntactic temporaries -- nobody
 ## named them, so nobody can hold them -- does not need those sequences to
@@ -470,6 +474,13 @@ proc javaFormat(fmt: string, args: openArray[Value]): string =
         else: body = "0".repeat(pad) & body
       else: body = " ".repeat(pad) & body
     result.add body
+
+proc currentOut(): File =
+  ## Where print and friends write. `binding` can move it to *err*.
+  if hasVar("clojure.core/*out*") and equals(getVar("clojure.core/*out*"), mkKeyword("stderr")):
+    stderr
+  else:
+    stdout
 
 proc registerCore*() =
   # ---- arithmetic
@@ -625,21 +636,37 @@ proc registerCore*() =
     var parts: seq[string] = @[]
     for x in a: parts.add prStr(x)
     mkStr(parts.join(" "))
+  def "*out*", mkKeyword("stdout")
+  def "*err*", mkKeyword("stderr")
+  def "*in*", mkKeyword("stdin")
   def "println", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add str(x)
-    echo parts.join(" ")
+    let f = currentOut()
+    f.write(parts.join(" ") & "\n")
+    f.flushFile
     NilV
   def "prn", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add prStr(x)
-    echo parts.join(" ")
+    let f = currentOut()
+    f.write(parts.join(" ") & "\n")
+    f.flushFile
     NilV
   def "print", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add str(x)
-    stdout.write parts.join(" ")
+    currentOut().write parts.join(" ")
     NilV
+  def "pr", proc (a: openArray[Value]): Value =
+    var parts: seq[string] = @[]
+    for x in a: parts.add prStr(x)
+    currentOut().write parts.join(" ")
+    NilV
+  def "flush", proc (a: openArray[Value]): Value =
+    currentOut().flushFile; NilV
+  def "newline", proc (a: openArray[Value]): Value =
+    currentOut().write "\n"; NilV
   def "name", proc (a: openArray[Value]): Value =
     case a[0].kind
     of kKeyword, kSymbol, kStr: mkStr(a[0].s)
@@ -701,6 +728,39 @@ proc registerCore*() =
     var xs: seq[Value] = @[]
     for ch in a[0].s: xs.add mkInt(ord(ch))
     mkList(xs)
+  def "StringBuilder.", proc (a: openArray[Value]): Value =
+    ## A mutable string: the one place a string value is written in place.
+    mkStr(if a.len > 0: str(a[0]) else: "")
+  def ".append", proc (a: openArray[Value]): Value =
+    if a[0].kind != kStr: err(".append expects a StringBuilder")
+    a[0].obj.s.add(str(a[1]))
+    a[0]
+  def ".toString", proc (a: openArray[Value]): Value = mkStr(str(a[0]))
+  def ".length", proc (a: openArray[Value]): Value = mkInt(int64(a[0].s.len))
+  def "*output-stream*", proc (a: openArray[Value]): Value =
+    ## A write handle, driven by keyword messages so that it stays an
+    ## ordinary value: (o :write bytes) and (o :close).
+    let path = a[0].s
+    var f: File
+    if not f.open(path, fmWrite): err("Cannot open for writing: " & path)
+    var closed = false
+    mkFn("output-stream", proc (args: openArray[Value]): Value =
+      if args.len == 0 or args[0].kind != kKeyword:
+        err("output-stream expects a keyword message")
+      case args[0].s
+      of "write":
+        if closed: err("Stream is closed: " & path)
+        var bytes = ""
+        for x in elems(args[1]): bytes.add char(uint8(intOf(x) and 0xff))
+        f.write(bytes)
+      of "close":
+        if not closed: f.close(); closed = true
+      else: err("Unknown stream message: " & prStr(args[0]))
+      NilV)
+  def ".write", proc (a: openArray[Value]): Value =
+    call(a[0], [mkKeyword("write"), a[1]])
+  def ".close", proc (a: openArray[Value]): Value =
+    (if a[0].kind == kFn: call(a[0], [mkKeyword("close")]) else: NilV)
   def "*delete-file*", proc (a: openArray[Value]): Value =
     try:
       removeFile(a[0].s)

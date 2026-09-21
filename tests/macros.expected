@@ -1,0 +1,15 @@
+:zero :one :few :other
+:nl
+1
+No matching clause: 5
+(0 1 4 9)
+([1 :x] [1 :y] [2 :x] [2 :y])
+abc
+Assert failed: nope
+Assert failed: (= 1 2)
+depth 0
+depth 3
+depth 0
+0
+hello 5
+hi
