@@ -406,7 +406,7 @@ proc genFn(name: string, clauses: seq[FnClause], selfIdent: string, env: Env,
           if boxes: directEnv.intFnBoxes.incl key
 
   let argsIdent = c.gensym("args")
-  c.line(dst & " = mkFn(" & nimStr(name) & ", proc (" & argsIdent & ": seq[Value]): Value =")
+  c.line(dst & " = mkFn(" & nimStr(name) & ", proc (" & argsIdent & ": openArray[Value]): Value =")
   c.push
   var first = true
   for ci, cl in clauses:
@@ -495,7 +495,7 @@ proc genLet(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
           lenv.locals[restSym] = id
           break
         let id = c.gensym("l" & mangle(symName(p)))
-        c.line("var " & id & ": Value = call(getVar(\"nth\"), @[" & v & ", mkInt(" &
+        c.line("var " & id & ": Value = call(getVar(\"nth\"), [" & v & ", mkInt(" &
                $idx & "), NilV])")
         lenv.locals[symName(p)] = id
         inc idx; inc j
@@ -506,14 +506,14 @@ proc genLet(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
           for ks in valForm.items:
             let nm = symName(ks)
             let id = c.gensym("l" & mangle(nm))
-            c.line("var " & id & ": Value = call(getVar(\"get\"), @[" & v &
+            c.line("var " & id & ": Value = call(getVar(\"get\"), [" & v &
                    ", mkKeyword(" & nimStr(nm) & ")])")
             lenv.locals[nm] = id
         else:
           let nm = symName(k)
           let id = c.gensym("l" & mangle(nm))
           let kv = genExpr(valForm, lenv, c)
-          c.line("var " & id & ": Value = call(getVar(\"get\"), @[" & v & ", " & kv & "])")
+          c.line("var " & id & ": Value = call(getVar(\"get\"), [" & v & ", " & kv & "])")
           lenv.locals[nm] = id
     else:
       err("Unsupported binding form: " & prStr(target))
@@ -602,7 +602,7 @@ proc genCall(f: Value, args: seq[Value], dst: string, env: Env, c: Ctx) =
         c.line("else:")
         c.push
         c.line(dst & " = call(cellGet(" & d.cell & "), " &
-               (if argIdents.len == 0: "emptyArgs" else: "@[" & argIdents.join(", ") & "]") & ")")
+               (if argIdents.len == 0: "emptyArgs" else: "[" & argIdents.join(", ") & "]") & ")")
         c.pop
       return
     let key = f.s & "/" & $args.len
@@ -623,7 +623,7 @@ proc genCall(f: Value, args: seq[Value], dst: string, env: Env, c: Ctx) =
       c.pop
       c.line("else:")
       c.push
-      c.line(dst & " = call(cellGet(" & cell & "), @[" & argIdents.join(", ") & "])")
+      c.line(dst & " = call(cellGet(" & cell & "), [" & argIdents.join(", ") & "])")
       c.pop
       return
   let fv = genExprTemp(f, env, c)
@@ -632,7 +632,7 @@ proc genCall(f: Value, args: seq[Value], dst: string, env: Env, c: Ctx) =
   if argIdents.len == 0:
     c.line(dst & " = call(" & fv & ", emptyArgs)")
   else:
-    c.line(dst & " = call(" & fv & ", @[" & argIdents.join(", ") & "])")
+    c.line(dst & " = call(" & fv & ", [" & argIdents.join(", ") & "])")
 
 ## ------------------------------------------------------- int specialisation
 ##
@@ -774,7 +774,7 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
     let hv = tryExpr(head, env, c)
     if hv.len == 0: return ""
     "call(" & hv & ", " &
-      (if ids.len == 0: "emptyArgs" else: "@[" & ids.join(", ") & "]") & ")"
+      (if ids.len == 0: "emptyArgs" else: "[" & ids.join(", ") & "]") & ")"
   of kFn, kCons, kChunk, kLazy:
     ""
 

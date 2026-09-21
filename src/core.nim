@@ -8,7 +8,7 @@ proc num(v: Value): float64 =
   of kFloat: v.f
   else: err("Not a number: " & prStr(v))
 
-proc isFloaty(vs: seq[Value]): bool =
+proc isFloaty(vs: openArray[Value]): bool =
   for v in vs:
     if v.kind == kFloat: return true
   false
@@ -19,7 +19,7 @@ proc intOf(v: Value): int64 =
   of kFloat: int64(v.f)
   else: err("Not a number: " & prStr(v))
 
-proc arith(name: string, args: seq[Value], unit: int64,
+proc arith(name: string, args: openArray[Value], unit: int64,
            fi: proc (a, b: int64): int64, ff: proc (a, b: float64): float64): Value =
   if args.len == 0: return mkInt(unit)
   if isFloaty(args):
@@ -32,7 +32,7 @@ proc arith(name: string, args: seq[Value], unit: int64,
   for i in start ..< args.len: acc = fi(acc, args[i].i)
   mkInt(acc)
 
-proc cmpChain(args: seq[Value], ok: proc (c: int): bool): Value =
+proc cmpChain(args: openArray[Value], ok: proc (c: int): bool): Value =
   for i in 0 ..< args.len - 1:
     let a = num(args[i])
     let b = num(args[i + 1])
@@ -103,37 +103,37 @@ proc dec1*(a: Value): Value {.inline.} =
 ## Guarded forms: the whole call site, cell check included, as one expression,
 ## for the call sites where a def in the program can still rebind the name.
 proc add2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
-  if cellIs(c, k): add2(a, b) else: call(cellGet(c), @[a, b])
+  if cellIs(c, k): add2(a, b) else: call(cellGet(c), [a, b])
 
 proc sub2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
-  if cellIs(c, k): sub2(a, b) else: call(cellGet(c), @[a, b])
+  if cellIs(c, k): sub2(a, b) else: call(cellGet(c), [a, b])
 
 proc mul2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
-  if cellIs(c, k): mul2(a, b) else: call(cellGet(c), @[a, b])
+  if cellIs(c, k): mul2(a, b) else: call(cellGet(c), [a, b])
 
 proc lt2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
-  if cellIs(c, k): lt2(a, b) else: call(cellGet(c), @[a, b])
+  if cellIs(c, k): lt2(a, b) else: call(cellGet(c), [a, b])
 
 proc gt2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
-  if cellIs(c, k): gt2(a, b) else: call(cellGet(c), @[a, b])
+  if cellIs(c, k): gt2(a, b) else: call(cellGet(c), [a, b])
 
 proc le2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
-  if cellIs(c, k): le2(a, b) else: call(cellGet(c), @[a, b])
+  if cellIs(c, k): le2(a, b) else: call(cellGet(c), [a, b])
 
 proc ge2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
-  if cellIs(c, k): ge2(a, b) else: call(cellGet(c), @[a, b])
+  if cellIs(c, k): ge2(a, b) else: call(cellGet(c), [a, b])
 
 proc eq2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
-  if cellIs(c, k): eq2(a, b) else: call(cellGet(c), @[a, b])
+  if cellIs(c, k): eq2(a, b) else: call(cellGet(c), [a, b])
 
 proc ne2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
-  if cellIs(c, k): ne2(a, b) else: call(cellGet(c), @[a, b])
+  if cellIs(c, k): ne2(a, b) else: call(cellGet(c), [a, b])
 
 proc inc1g*(c: VarCell, k: Value, a: Value): Value {.inline.} =
-  if cellIs(c, k): inc1(a) else: call(cellGet(c), @[a])
+  if cellIs(c, k): inc1(a) else: call(cellGet(c), [a])
 
 proc dec1g*(c: VarCell, k: Value, a: Value): Value {.inline.} =
-  if cellIs(c, k): dec1(a) else: call(cellGet(c), @[a])
+  if cellIs(c, k): dec1(a) else: call(cellGet(c), [a])
 
 proc getIn(coll, k, dflt: Value): Value =
   if coll.isNil or coll.kind == kNil: return dflt
@@ -206,7 +206,7 @@ proc lazyMap(f: Value, c: Cursor): Value =
     var cc = cur
     var xs = newSeqOfCap[Value](ChunkSize)
     while xs.len < ChunkSize and hasNext(cc):
-      xs.add call(f, @[next(cc)])
+      xs.add call(f, [next(cc)])
     if xs.len == 0: return NilV
     mkChunk(xs, 0, lazyMap(f, cc)))
 
@@ -226,7 +226,7 @@ proc lazyMapIndexed(f: Value, i: int64, c: Cursor): Value =
     var cc = cur
     if not hasNext(cc): return NilV
     let x = next(cc)
-    mkCons(call(f, @[mkInt(i), x]), lazyMapIndexed(f, i + 1, cc)))
+    mkCons(call(f, [mkInt(i), x]), lazyMapIndexed(f, i + 1, cc)))
 
 proc lazyFilter(pred: Value, c: Cursor, keep: bool): Value =
   ## Draws up to ChunkSize source elements per step and emits whichever pass,
@@ -240,7 +240,7 @@ proc lazyFilter(pred: Value, c: Cursor, keep: bool): Value =
       var drawn = 0
       while drawn < ChunkSize and hasNext(cc):
         let x = next(cc)
-        if truthy(call(pred, @[x])) == keep: xs.add x
+        if truthy(call(pred, [x])) == keep: xs.add x
         inc drawn
       if xs.len > 0: return mkChunk(xs, 0, lazyFilter(pred, cc, keep))
       if drawn == 0: return NilV)
@@ -270,7 +270,7 @@ proc lazyTakeWhile(pred: Value, c: Cursor): Value =
     var cc = cur
     if not hasNext(cc): return NilV
     let x = next(cc)
-    if not truthy(call(pred, @[x])): return NilV
+    if not truthy(call(pred, [x])): return NilV
     mkCons(x, lazyTakeWhile(pred, cc)))
 
 proc lazyDropWhile(pred: Value, c: Cursor): Value =
@@ -281,7 +281,7 @@ proc lazyDropWhile(pred: Value, c: Cursor): Value =
       var peek = cc
       if not hasNext(peek): return NilV
       let x = next(peek)
-      if not truthy(call(pred, @[x])): return mkCons(x, lazyOf(peek))
+      if not truthy(call(pred, [x])): return mkCons(x, lazyOf(peek))
       cc = peek)
 
 proc lazyRange(i, hi, step: int64, bounded: bool): Value =
@@ -299,7 +299,7 @@ proc lazyRange(i, hi, step: int64, bounded: bool): Value =
     mkChunk(xs, 0, lazyRange(cur, hi, step, bounded)))
 
 proc lazyIterate(f, x: Value): Value =
-  mkLazy(proc (): Value = mkCons(x, lazyIterate(f, call(f, @[x]))))
+  mkLazy(proc (): Value = mkCons(x, lazyIterate(f, call(f, [x]))))
 
 proc lazyRepeat(x: Value, n: int64, bounded: bool): Value =
   mkLazy(proc (): Value =
@@ -309,7 +309,7 @@ proc lazyRepeat(x: Value, n: int64, bounded: bool): Value =
 proc lazyRepeatedly(f: Value, n: int64, bounded: bool): Value =
   mkLazy(proc (): Value =
     if bounded and n <= 0: return NilV
-    mkCons(call(f, @[]), lazyRepeatedly(f, n - 1, bounded)))
+    mkCons(call(f, []), lazyRepeatedly(f, n - 1, bounded)))
 
 proc lazyCycle(orig: Value, c: Cursor): Value =
   let cur = c
@@ -332,86 +332,86 @@ proc lazyConcat(colls: seq[Value], i: int, c: Cursor): Value =
     let x = next(cc)
     mkCons(x, lazyConcat(colls, k, cc)))
 
-proc def(name: string, f: proc (args: seq[Value]): Value {.closure.}) =
+proc def(name: string, f: proc (args: openArray[Value]): Value {.closure.}) =
   setVar(name, mkFn(name, f))
 
 proc registerCore*() =
   # ---- arithmetic
-  def "+", proc (a: seq[Value]): Value =
+  def "+", proc (a: openArray[Value]): Value =
     arith("+", a, 0, proc (x, y: int64): int64 = x + y, proc (x, y: float64): float64 = x + y)
-  def "-", proc (a: seq[Value]): Value =
+  def "-", proc (a: openArray[Value]): Value =
     arith("-", a, 0, proc (x, y: int64): int64 = x - y, proc (x, y: float64): float64 = x - y)
-  def "*", proc (a: seq[Value]): Value =
+  def "*", proc (a: openArray[Value]): Value =
     arith("*", a, 1, proc (x, y: int64): int64 = x * y, proc (x, y: float64): float64 = x * y)
-  def "/", proc (a: seq[Value]): Value =
+  def "/", proc (a: openArray[Value]): Value =
     if isFloaty(a) or a.len == 1:
       arith("/", a, 1, proc (x, y: int64): int64 = x div y, proc (x, y: float64): float64 = x / y)
     else:
       for i in 1 ..< a.len:
         if a[i].kind == kInt and a[i].i == 0: err("Divide by zero")
       arith("/", a, 1, proc (x, y: int64): int64 = x div y, proc (x, y: float64): float64 = x / y)
-  def "quot", proc (a: seq[Value]): Value = mkInt(idiv(intOf(a[0]), intOf(a[1])))
-  def "rem", proc (a: seq[Value]): Value = mkInt(irem(intOf(a[0]), intOf(a[1])))
-  def "mod", proc (a: seq[Value]): Value =
+  def "quot", proc (a: openArray[Value]): Value = mkInt(idiv(intOf(a[0]), intOf(a[1])))
+  def "rem", proc (a: openArray[Value]): Value = mkInt(irem(intOf(a[0]), intOf(a[1])))
+  def "mod", proc (a: openArray[Value]): Value =
     let x = intOf(a[0]); let y = intOf(a[1])
     var r = irem(x, y)
     if r != 0 and ((r < 0) != (y < 0)): r += y
     mkInt(r)
-  def "inc", proc (a: seq[Value]): Value =
+  def "inc", proc (a: openArray[Value]): Value =
     (if a[0].kind == kFloat: mkFloat(a[0].f + 1.0) else: mkInt(a[0].i + 1))
-  def "dec", proc (a: seq[Value]): Value =
+  def "dec", proc (a: openArray[Value]): Value =
     (if a[0].kind == kFloat: mkFloat(a[0].f - 1.0) else: mkInt(a[0].i - 1))
-  def "max", proc (a: seq[Value]): Value =
+  def "max", proc (a: openArray[Value]): Value =
     result = a[0]
     for x in a: (if num(x) > num(result): result = x)
-  def "min", proc (a: seq[Value]): Value =
+  def "min", proc (a: openArray[Value]): Value =
     result = a[0]
     for x in a: (if num(x) < num(result): result = x)
-  def "abs", proc (a: seq[Value]): Value =
+  def "abs", proc (a: openArray[Value]): Value =
     (if a[0].kind == kFloat: mkFloat(abs(a[0].f)) else: mkInt(abs(a[0].i)))
-  def "Math/sqrt", proc (a: seq[Value]): Value = mkFloat(sqrt(num(a[0])))
-  def "Math/pow", proc (a: seq[Value]): Value = mkFloat(pow(num(a[0]), num(a[1])))
-  def "rand-int", proc (a: seq[Value]): Value = mkInt(rand(int(intOf(a[0])) - 1))
-  def "double", proc (a: seq[Value]): Value = mkFloat(num(a[0]))
-  def "int", proc (a: seq[Value]): Value = mkInt(intOf(a[0]))
+  def "Math/sqrt", proc (a: openArray[Value]): Value = mkFloat(sqrt(num(a[0])))
+  def "Math/pow", proc (a: openArray[Value]): Value = mkFloat(pow(num(a[0]), num(a[1])))
+  def "rand-int", proc (a: openArray[Value]): Value = mkInt(rand(int(intOf(a[0])) - 1))
+  def "double", proc (a: openArray[Value]): Value = mkFloat(num(a[0]))
+  def "int", proc (a: openArray[Value]): Value = mkInt(intOf(a[0]))
 
   # ---- comparison / predicates
-  def "=", proc (a: seq[Value]): Value =
+  def "=", proc (a: openArray[Value]): Value =
     for i in 0 ..< a.len - 1:
       if not equals(a[i], a[i + 1]): return FalseV
     TrueV
-  def "not=", proc (a: seq[Value]): Value =
+  def "not=", proc (a: openArray[Value]): Value =
     for i in 0 ..< a.len - 1:
       if not equals(a[i], a[i + 1]): return TrueV
     FalseV
-  def "<", proc (a: seq[Value]): Value = cmpChain(a, proc (c: int): bool = c < 0)
-  def ">", proc (a: seq[Value]): Value = cmpChain(a, proc (c: int): bool = c > 0)
-  def "<=", proc (a: seq[Value]): Value = cmpChain(a, proc (c: int): bool = c <= 0)
-  def ">=", proc (a: seq[Value]): Value = cmpChain(a, proc (c: int): bool = c >= 0)
-  def "not", proc (a: seq[Value]): Value = mkBool(not truthy(a[0]))
-  def "nil?", proc (a: seq[Value]): Value = mkBool(a[0].isNil or a[0].kind == kNil)
-  def "some?", proc (a: seq[Value]): Value = mkBool(not (a[0].isNil or a[0].kind == kNil))
-  def "true?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kBool and a[0].b)
-  def "false?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kBool and not a[0].b)
-  def "zero?", proc (a: seq[Value]): Value = mkBool(num(a[0]) == 0.0)
-  def "pos?", proc (a: seq[Value]): Value = mkBool(num(a[0]) > 0.0)
-  def "neg?", proc (a: seq[Value]): Value = mkBool(num(a[0]) < 0.0)
-  def "even?", proc (a: seq[Value]): Value = mkBool(intOf(a[0]) mod 2 == 0)
-  def "odd?", proc (a: seq[Value]): Value = mkBool(intOf(a[0]) mod 2 != 0)
-  def "string?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kStr)
-  def "number?", proc (a: seq[Value]): Value = mkBool(a[0].kind in {kInt, kFloat})
-  def "int?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kInt)
-  def "keyword?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kKeyword)
-  def "symbol?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kSymbol)
-  def "vector?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kVector)
-  def "list?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kList)
-  def "map?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kMap)
-  def "set?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kSet)
-  def "coll?", proc (a: seq[Value]): Value =
+  def "<", proc (a: openArray[Value]): Value = cmpChain(a, proc (c: int): bool = c < 0)
+  def ">", proc (a: openArray[Value]): Value = cmpChain(a, proc (c: int): bool = c > 0)
+  def "<=", proc (a: openArray[Value]): Value = cmpChain(a, proc (c: int): bool = c <= 0)
+  def ">=", proc (a: openArray[Value]): Value = cmpChain(a, proc (c: int): bool = c >= 0)
+  def "not", proc (a: openArray[Value]): Value = mkBool(not truthy(a[0]))
+  def "nil?", proc (a: openArray[Value]): Value = mkBool(a[0].isNil or a[0].kind == kNil)
+  def "some?", proc (a: openArray[Value]): Value = mkBool(not (a[0].isNil or a[0].kind == kNil))
+  def "true?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kBool and a[0].b)
+  def "false?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kBool and not a[0].b)
+  def "zero?", proc (a: openArray[Value]): Value = mkBool(num(a[0]) == 0.0)
+  def "pos?", proc (a: openArray[Value]): Value = mkBool(num(a[0]) > 0.0)
+  def "neg?", proc (a: openArray[Value]): Value = mkBool(num(a[0]) < 0.0)
+  def "even?", proc (a: openArray[Value]): Value = mkBool(intOf(a[0]) mod 2 == 0)
+  def "odd?", proc (a: openArray[Value]): Value = mkBool(intOf(a[0]) mod 2 != 0)
+  def "string?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kStr)
+  def "number?", proc (a: openArray[Value]): Value = mkBool(a[0].kind in {kInt, kFloat})
+  def "int?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kInt)
+  def "keyword?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kKeyword)
+  def "symbol?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kSymbol)
+  def "vector?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kVector)
+  def "list?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kList)
+  def "map?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kMap)
+  def "set?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kSet)
+  def "coll?", proc (a: openArray[Value]): Value =
     mkBool(a[0].kind in {kList, kVector, kMap, kSet})
-  def "fn?", proc (a: seq[Value]): Value = mkBool(a[0].kind == kFn)
-  def "empty?", proc (a: seq[Value]): Value = mkBool(seqIsEmpty(a[0]))
-  def "contains?", proc (a: seq[Value]): Value =
+  def "fn?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kFn)
+  def "empty?", proc (a: openArray[Value]): Value = mkBool(seqIsEmpty(a[0]))
+  def "contains?", proc (a: openArray[Value]): Value =
     let c = a[0]
     if c.isNil or c.kind == kNil: return FalseV
     case c.kind
@@ -421,97 +421,97 @@ proc registerCore*() =
     else: FalseV
 
   # ---- strings / IO
-  def "str", proc (a: seq[Value]): Value =
+  def "str", proc (a: openArray[Value]): Value =
     var s = ""
     for x in a: s &= str(x)
     mkStr(s)
-  def "pr-str", proc (a: seq[Value]): Value =
+  def "pr-str", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add prStr(x)
     mkStr(parts.join(" "))
-  def "println", proc (a: seq[Value]): Value =
+  def "println", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add str(x)
     echo parts.join(" ")
     NilV
-  def "prn", proc (a: seq[Value]): Value =
+  def "prn", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add prStr(x)
     echo parts.join(" ")
     NilV
-  def "print", proc (a: seq[Value]): Value =
+  def "print", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add str(x)
     stdout.write parts.join(" ")
     NilV
-  def "name", proc (a: seq[Value]): Value =
+  def "name", proc (a: openArray[Value]): Value =
     case a[0].kind
     of kKeyword, kSymbol, kStr: mkStr(a[0].s)
     else: err("name expects keyword/symbol/string")
-  def "keyword", proc (a: seq[Value]): Value = mkKeyword(str(a[0]))
-  def "symbol", proc (a: seq[Value]): Value = mkSymbol(str(a[0]))
-  def "subs", proc (a: seq[Value]): Value =
+  def "keyword", proc (a: openArray[Value]): Value = mkKeyword(str(a[0]))
+  def "symbol", proc (a: openArray[Value]): Value = mkSymbol(str(a[0]))
+  def "subs", proc (a: openArray[Value]): Value =
     let s = a[0].s
     let st = int(intOf(a[1]))
     let en = (if a.len > 2: int(intOf(a[2])) else: s.len)
     mkStr(s[st ..< en])
-  def "clojure.string/upper-case", proc (a: seq[Value]): Value = mkStr(a[0].s.toUpperAscii)
-  def "clojure.string/lower-case", proc (a: seq[Value]): Value = mkStr(a[0].s.toLowerAscii)
-  def "clojure.string/trim", proc (a: seq[Value]): Value = mkStr(a[0].s.strip)
-  def "clojure.string/split", proc (a: seq[Value]): Value =
+  def "clojure.string/upper-case", proc (a: openArray[Value]): Value = mkStr(a[0].s.toUpperAscii)
+  def "clojure.string/lower-case", proc (a: openArray[Value]): Value = mkStr(a[0].s.toLowerAscii)
+  def "clojure.string/trim", proc (a: openArray[Value]): Value = mkStr(a[0].s.strip)
+  def "clojure.string/split", proc (a: openArray[Value]): Value =
     var r: seq[Value] = @[]
     for piece in a[0].s.split(a[1].s): r.add mkStr(piece)
     mkVector(r)
-  def "clojure.string/join", proc (a: seq[Value]): Value =
+  def "clojure.string/join", proc (a: openArray[Value]): Value =
     let sep = (if a.len > 1: str(a[0]) else: "")
     let coll = (if a.len > 1: a[1] else: a[0])
     var parts: seq[string] = @[]
     for x in elems(coll): parts.add str(x)
     mkStr(parts.join(sep))
-  def "read-line", proc (a: seq[Value]): Value =
+  def "read-line", proc (a: openArray[Value]): Value =
     try: mkStr(stdin.readLine()) except CatchableError: NilV
-  def "slurp", proc (a: seq[Value]): Value = mkStr(readFile(a[0].s))
-  def "spit", proc (a: seq[Value]): Value =
+  def "slurp", proc (a: openArray[Value]): Value = mkStr(readFile(a[0].s))
+  def "spit", proc (a: openArray[Value]): Value =
     writeFile(a[0].s, str(a[1])); NilV
-  def "now-ms", proc (a: seq[Value]): Value = mkInt(int64(epochTime() * 1000))
+  def "now-ms", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))
 
   # ---- collections
-  def "list", proc (a: seq[Value]): Value = mkList(a)
-  def "vector", proc (a: seq[Value]): Value = mkVector(a)
-  def "hash-map", proc (a: seq[Value]): Value =
+  def "list", proc (a: openArray[Value]): Value = mkList(a)
+  def "vector", proc (a: openArray[Value]): Value = mkVector(a)
+  def "hash-map", proc (a: openArray[Value]): Value =
     var m = emptyPMap()
     var i = 0
     while i + 1 < a.len:
       m = mapAssoc(m, a[i], a[i + 1]); i += 2
     mkMapOf(m)
-  def "hash-set", proc (a: seq[Value]): Value = mkSet(a)
-  def "set", proc (a: seq[Value]): Value = mkSet(toSeq(a[0]))
-  def "vec", proc (a: seq[Value]): Value = mkVector(toSeq(a[0]))
-  def "seq", proc (a: seq[Value]): Value =
+  def "hash-set", proc (a: openArray[Value]): Value = mkSet(a)
+  def "set", proc (a: openArray[Value]): Value = mkSet(toSeq(a[0]))
+  def "vec", proc (a: openArray[Value]): Value = mkVector(toSeq(a[0]))
+  def "seq", proc (a: openArray[Value]): Value =
     # does not realize a lazy seq — just asks whether it has a first element
     (if seqIsEmpty(a[0]): NilV else: a[0])
-  def "count", proc (a: seq[Value]): Value =
+  def "count", proc (a: openArray[Value]): Value =
     if a[0].isNil or a[0].kind == kNil: return mkInt(0)
     mkInt(count(a[0]))
-  def "conj", proc (a: seq[Value]): Value =
+  def "conj", proc (a: openArray[Value]): Value =
     result = a[0]
     for i in 1 ..< a.len: result = conjOne(result, a[i])
-  def "cons", proc (a: seq[Value]): Value = mkCons(a[0], a[1])
-  def "first", proc (a: seq[Value]): Value =
+  def "cons", proc (a: openArray[Value]): Value = mkCons(a[0], a[1])
+  def "first", proc (a: openArray[Value]): Value =
     if a[0].kind == kVector:
       return (if a[0].vec.cnt == 0: NilV else: vecNth(a[0].vec, 0))
     seqFirst(a[0])
-  def "second", proc (a: seq[Value]): Value = seqFirst(seqRest(a[0]))
-  def "last", proc (a: seq[Value]): Value =
+  def "second", proc (a: openArray[Value]): Value = seqFirst(seqRest(a[0]))
+  def "last", proc (a: openArray[Value]): Value =
     if a[0].kind == kVector:
       return (if a[0].vec.cnt == 0: NilV else: vecNth(a[0].vec, a[0].vec.cnt - 1))
     result = NilV
     for x in elems(a[0]): result = x
-  def "rest", proc (a: seq[Value]): Value = seqRest(a[0])
-  def "next", proc (a: seq[Value]): Value =
+  def "rest", proc (a: openArray[Value]): Value = seqRest(a[0])
+  def "next", proc (a: openArray[Value]): Value =
     let r = seqRest(a[0])
     (if seqIsEmpty(r): NilV else: r)
-  def "nth", proc (a: seq[Value]): Value =
+  def "nth", proc (a: openArray[Value]): Value =
     let i = int(intOf(a[1]))
     if a[0].kind == kVector:
       # O(log32 n) straight through the trie, no intermediate seq
@@ -528,39 +528,39 @@ proc registerCore*() =
         dec k
     if a.len > 2: a[2]
     else: err("Index out of bounds: " & $i)
-  def "get", proc (a: seq[Value]): Value =
+  def "get", proc (a: openArray[Value]): Value =
     getIn(a[0], a[1], (if a.len > 2: a[2] else: NilV))
-  def "get-in", proc (a: seq[Value]): Value =
+  def "get-in", proc (a: openArray[Value]): Value =
     var cur = a[0]
     for k in toSeq(a[1]):
       cur = getIn(cur, k, NilV)
     (if (cur.isNil or cur.kind == kNil) and a.len > 2: a[2] else: cur)
-  def "assoc", proc (a: seq[Value]): Value =
+  def "assoc", proc (a: openArray[Value]): Value =
     result = a[0]
     var i = 1
     while i + 1 < a.len:
       result = assocOne(result, a[i], a[i + 1]); i += 2
-  def "dissoc", proc (a: seq[Value]): Value =
+  def "dissoc", proc (a: openArray[Value]): Value =
     var m = a[0].m
     for i in 1 ..< a.len: m = mapDissoc(m, a[i])
     mkMapOf(m)
-  def "update", proc (a: seq[Value]): Value =
+  def "update", proc (a: openArray[Value]): Value =
     let cur = getIn(a[0], a[1], NilV)
-    assocOne(a[0], a[1], call(a[2], @[cur] & a[3 .. ^1]))
-  def "keys", proc (a: seq[Value]): Value =
+    assocOne(a[0], a[1], call(a[2], @[cur] & @(a[3 .. ^1])))
+  def "keys", proc (a: openArray[Value]): Value =
     var r: seq[Value] = @[]
     for e in mapEntries(a[0].m): r.add e.key
     (if r.len == 0: NilV else: mkList(r))
-  def "vals", proc (a: seq[Value]): Value =
+  def "vals", proc (a: openArray[Value]): Value =
     var r: seq[Value] = @[]
     for e in mapEntries(a[0].m): r.add e.val
     (if r.len == 0: NilV else: mkList(r))
-  def "reverse", proc (a: seq[Value]): Value =
+  def "reverse", proc (a: openArray[Value]): Value =
     let s = toSeq(a[0])
     var r: seq[Value] = @[]
     for i in countdown(s.len - 1, 0): r.add s[i]
     mkList(r)
-  def "range", proc (a: seq[Value]): Value =
+  def "range", proc (a: openArray[Value]): Value =
     var lo: int64 = 0
     var hi: int64 = 0
     var step: int64 = 1
@@ -570,25 +570,25 @@ proc registerCore*() =
       if a.len > 2: step = intOf(a[2])
     # (range) with no bound is infinite; everything else stops at hi
     lazyRange(lo, hi, step, bounded = a.len > 0)
-  def "take", proc (a: seq[Value]): Value =
+  def "take", proc (a: openArray[Value]): Value =
     lazyTake(int(intOf(a[0])), cursor(a[1]))
-  def "drop", proc (a: seq[Value]): Value =
+  def "drop", proc (a: openArray[Value]): Value =
     lazyDrop(int(intOf(a[0])), cursor(a[1]))
-  def "concat", proc (a: seq[Value]): Value =
-    lazyConcat(a, 0, cursor(NilV))
-  def "iterate", proc (a: seq[Value]): Value = lazyIterate(a[0], a[1])
-  def "repeat", proc (a: seq[Value]): Value =
+  def "concat", proc (a: openArray[Value]): Value =
+    lazyConcat(@a, 0, cursor(NilV))
+  def "iterate", proc (a: openArray[Value]): Value = lazyIterate(a[0], a[1])
+  def "repeat", proc (a: openArray[Value]): Value =
     (if a.len == 1: lazyRepeat(a[0], 0, bounded = false)
      else: lazyRepeat(a[1], intOf(a[0]), bounded = true))
-  def "repeatedly", proc (a: seq[Value]): Value =
+  def "repeatedly", proc (a: openArray[Value]): Value =
     (if a.len == 1: lazyRepeatedly(a[0], 0, bounded = false)
      else: lazyRepeatedly(a[1], intOf(a[0]), bounded = true))
-  def "cycle", proc (a: seq[Value]): Value = lazyCycle(a[0], cursor(a[0]))
-  def "doall", proc (a: seq[Value]): Value = mkList(toSeq(a[0]))
-  def "dorun", proc (a: seq[Value]): Value =
+  def "cycle", proc (a: openArray[Value]): Value = lazyCycle(a[0], cursor(a[0]))
+  def "doall", proc (a: openArray[Value]): Value = mkList(toSeq(a[0]))
+  def "dorun", proc (a: openArray[Value]): Value =
     for x in elems(a[0]): discard
     NilV
-  def "sort", proc (a: seq[Value]): Value =
+  def "sort", proc (a: openArray[Value]): Value =
     var s = toSeq(a[^1])
     let cmpFn = (if a.len > 1: a[0] else: NilV)
     # insertion sort keeps it simple and stable
@@ -596,25 +596,25 @@ proc registerCore*() =
       var j = i
       while j > 0:
         let before =
-          if cmpFn.kind == kFn: truthy(call(cmpFn, @[s[j], s[j - 1]]))
+          if cmpFn.kind == kFn: truthy(call(cmpFn, [s[j], s[j - 1]]))
           elif s[j].kind == kStr: s[j].s < s[j - 1].s
           else: num(s[j]) < num(s[j - 1])
         if not before: break
         swap(s[j], s[j - 1]); dec j
     mkList(s)
-  def "sort-by", proc (a: seq[Value]): Value =
+  def "sort-by", proc (a: openArray[Value]): Value =
     var s = toSeq(a[^1])
     let kf = a[0]
     for i in 1 ..< s.len:
       var j = i
       while j > 0:
-        let ka = call(kf, @[s[j]])
-        let kb = call(kf, @[s[j - 1]])
+        let ka = call(kf, [s[j]])
+        let kb = call(kf, [s[j - 1]])
         let before = (if ka.kind == kStr: ka.s < kb.s else: num(ka) < num(kb))
         if not before: break
         swap(s[j], s[j - 1]); dec j
     mkList(s)
-  def "distinct", proc (a: seq[Value]): Value =
+  def "distinct", proc (a: openArray[Value]): Value =
     var r: seq[Value] = @[]
     for x in elems(a[0]):
       var dup = false
@@ -622,13 +622,13 @@ proc registerCore*() =
         if equals(x, y): dup = true; break
       if not dup: r.add x
     mkList(r)
-  def "interpose", proc (a: seq[Value]): Value =
+  def "interpose", proc (a: openArray[Value]): Value =
     var r: seq[Value] = @[]
     for x in elems(a[1]):
       if r.len > 0: r.add a[0]
       r.add x
     mkList(r)
-  def "partition", proc (a: seq[Value]): Value =
+  def "partition", proc (a: openArray[Value]): Value =
     let n = int(intOf(a[0]))
     let s = toSeq(a[^1])
     var r: seq[Value] = @[]
@@ -638,27 +638,27 @@ proc registerCore*() =
     mkList(r)
 
   # ---- higher order
-  def "apply", proc (a: seq[Value]): Value =
+  def "apply", proc (a: openArray[Value]): Value =
     var callArgs: seq[Value] = @[]
     for i in 1 ..< a.len - 1: callArgs.add a[i]
     callArgs.add toSeq(a[^1])
     call(a[0], callArgs)
-  def "map", proc (a: seq[Value]): Value =
+  def "map", proc (a: openArray[Value]): Value =
     if a.len == 2: return lazyMap(a[0], cursor(a[1]))
     var cs: seq[Cursor] = @[]
     for i in 1 ..< a.len: cs.add cursor(a[i])
     lazyMapN(a[0], cs)
-  def "mapv", proc (a: seq[Value]): Value =
+  def "mapv", proc (a: openArray[Value]): Value =
     var r: seq[Value] = @[]
-    for x in elems(a[1]): r.add call(a[0], @[x])
+    for x in elems(a[1]): r.add call(a[0], [x])
     mkVector(r)
-  def "map-indexed", proc (a: seq[Value]): Value =
+  def "map-indexed", proc (a: openArray[Value]): Value =
     lazyMapIndexed(a[0], 0, cursor(a[1]))
-  def "filter", proc (a: seq[Value]): Value =
+  def "filter", proc (a: openArray[Value]): Value =
     lazyFilter(a[0], cursor(a[1]), keep = true)
-  def "remove", proc (a: seq[Value]): Value =
+  def "remove", proc (a: openArray[Value]): Value =
     lazyFilter(a[0], cursor(a[1]), keep = false)
-  def "reduce", proc (a: seq[Value]): Value =
+  def "reduce", proc (a: openArray[Value]): Value =
     ## Streams the source rather than materializing it, so folding a lazy seq
     ## holds one chunk at a time instead of the whole sequence.
     let f = a[0]
@@ -667,74 +667,74 @@ proc registerCore*() =
       var first = true
       for x in elems(a[1]):
         if first: acc = x; first = false
-        else: acc = call(f, @[acc, x])
-      if first: return call(f, @[])
+        else: acc = call(f, [acc, x])
+      if first: return call(f, [])
       return acc
     var acc = a[1]
-    for x in elems(a[2]): acc = call(f, @[acc, x])
+    for x in elems(a[2]): acc = call(f, [acc, x])
     acc
-  def "some", proc (a: seq[Value]): Value =
+  def "some", proc (a: openArray[Value]): Value =
     for x in elems(a[1]):
-      let r = call(a[0], @[x])
+      let r = call(a[0], [x])
       if truthy(r): return r
     NilV
-  def "every?", proc (a: seq[Value]): Value =
+  def "every?", proc (a: openArray[Value]): Value =
     for x in elems(a[1]):
-      if not truthy(call(a[0], @[x])): return FalseV
+      if not truthy(call(a[0], [x])): return FalseV
     TrueV
-  def "take-while", proc (a: seq[Value]): Value =
+  def "take-while", proc (a: openArray[Value]): Value =
     lazyTakeWhile(a[0], cursor(a[1]))
-  def "drop-while", proc (a: seq[Value]): Value =
+  def "drop-while", proc (a: openArray[Value]): Value =
     lazyDropWhile(a[0], cursor(a[1]))
-  def "group-by", proc (a: seq[Value]): Value =
+  def "group-by", proc (a: openArray[Value]): Value =
     var m = emptyPMap()
     for x in elems(a[1]):
-      let k = call(a[0], @[x])
+      let k = call(a[0], [x])
       m = mapAssoc(m, k, conjOne(mapGet(m, k, mkVector(@[])), x))
     mkMapOf(m)
-  def "frequencies", proc (a: seq[Value]): Value =
+  def "frequencies", proc (a: openArray[Value]): Value =
     var m = emptyPMap()
     for x in elems(a[0]):
       m = mapAssoc(m, x, mkInt(mapGet(m, x, mkInt(0)).i + 1))
     mkMapOf(m)
-  def "identity", proc (a: seq[Value]): Value = a[0]
-  def "comp", proc (a: seq[Value]): Value =
-    let fs = a
-    mkFn("comp", proc (args: seq[Value]): Value =
+  def "identity", proc (a: openArray[Value]): Value = a[0]
+  def "comp", proc (a: openArray[Value]): Value =
+    let fs = @a
+    mkFn("comp", proc (args: openArray[Value]): Value =
       if fs.len == 0: return argAt(args, 0)
       var v = call(fs[^1], args)
-      for i in countdown(fs.len - 2, 0): v = call(fs[i], @[v])
+      for i in countdown(fs.len - 2, 0): v = call(fs[i], [v])
       v)
-  def "partial", proc (a: seq[Value]): Value =
+  def "partial", proc (a: openArray[Value]): Value =
     let f = a[0]
     let bound = a[1 .. ^1]
-    mkFn("partial", proc (args: seq[Value]): Value = call(f, bound & args))
-  def "juxt", proc (a: seq[Value]): Value =
-    let fs = a
-    mkFn("juxt", proc (args: seq[Value]): Value =
+    mkFn("partial", proc (args: openArray[Value]): Value = call(f, bound & @args))
+  def "juxt", proc (a: openArray[Value]): Value =
+    let fs = @a
+    mkFn("juxt", proc (args: openArray[Value]): Value =
       var r: seq[Value] = @[]
       for f in fs: r.add call(f, args)
       mkVector(r))
-  def "constantly", proc (a: seq[Value]): Value =
+  def "constantly", proc (a: openArray[Value]): Value =
     let v = a[0]
-    mkFn("constantly", proc (args: seq[Value]): Value = v)
+    mkFn("constantly", proc (args: openArray[Value]): Value = v)
 
   # ---- atoms (mutable boxes, modelled as a 1-slot vector)
-  def "atom", proc (a: seq[Value]): Value =
+  def "atom", proc (a: openArray[Value]): Value =
     var cell = a[0]
-    mkFn("atom", proc (args: seq[Value]): Value =
+    mkFn("atom", proc (args: openArray[Value]): Value =
       # (a)        -> deref
       # (a :set v) -> reset
       if args.len == 0: return cell
       cell = args[1]
       cell)
-  def "deref", proc (a: seq[Value]): Value = call(a[0], @[])
-  def "reset!", proc (a: seq[Value]): Value = call(a[0], @[mkKeyword("set"), a[1]])
-  def "swap!", proc (a: seq[Value]): Value =
-    let cur = call(a[0], @[])
-    let nv = call(a[1], @[cur] & a[2 .. ^1])
-    call(a[0], @[mkKeyword("set"), nv])
+  def "deref", proc (a: openArray[Value]): Value = call(a[0], [])
+  def "reset!", proc (a: openArray[Value]): Value = call(a[0], [mkKeyword("set"), a[1]])
+  def "swap!", proc (a: openArray[Value]): Value =
+    let cur = call(a[0], [])
+    let nv = call(a[1], @[cur] & @(a[2 .. ^1]))
+    call(a[0], [mkKeyword("set"), nv])
 
-  def "throw", proc (a: seq[Value]): Value = err(str(a[0]))
-  def "ex-info", proc (a: seq[Value]): Value = mkStr(str(a[0]))
-  def "time-ms", proc (a: seq[Value]): Value = mkInt(int64(epochTime() * 1000))
+  def "throw", proc (a: openArray[Value]): Value = err(str(a[0]))
+  def "ex-info", proc (a: openArray[Value]): Value = mkStr(str(a[0]))
+  def "time-ms", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))

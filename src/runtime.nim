@@ -81,7 +81,7 @@ type
       cached*: Value
       forced*: bool
     of kFn:
-      fn*: proc (args: seq[Value]): Value {.closure.}
+      fn*: proc (args: openArray[Value]): Value {.closure.}
       name*: string
 
   CljError* = object of CatchableError
@@ -404,7 +404,13 @@ proc mkSet*(xs: seq[Value]): Value =
     if not mapContains(m, x): m = mapAssoc(m, x, x)
   Value(kind: kSet, m: m)
 
-proc mkFn*(name: string, f: proc (args: seq[Value]): Value {.closure.}): Value =
+# openArray overloads, so a builtin can pass its argument list straight through
+# without first copying it into a seq.
+proc mkList*(xs: openArray[Value]): Value = mkList(@xs)
+proc mkVector*(xs: openArray[Value]): Value = mkVector(@xs)
+proc mkSet*(xs: openArray[Value]): Value = mkSet(@xs)
+
+proc mkFn*(name: string, f: proc (args: openArray[Value]): Value {.closure.}): Value =
   Value(kind: kFn, fn: f, name: name)
 
 # --------------------------------------------------------------- lazy seqs
@@ -737,7 +743,7 @@ proc hasVar*(name: string): bool =
   globals.hasKey(name) and globals[name].bound
 
 # ---------------------------------------------------------------- calling
-proc call*(f: Value, args: seq[Value]): Value =
+proc call*(f: Value, args: openArray[Value]): Value =
   if f.isNil: err("Can't call nil")
   case f.kind
   of kFn: f.fn(args)
@@ -755,14 +761,14 @@ proc call*(f: Value, args: seq[Value]): Value =
     vecNth(f.vec, int(args[0].i))
   else: err("Can't call value of kind " & $f.kind & ": " & prStr(f))
 
-proc argAt*(args: seq[Value], i: int): Value =
+proc argAt*(args: openArray[Value], i: int): Value =
   if i < args.len: args[i] else: NilV
 
-proc restArgs*(args: seq[Value], i: int): Value =
+proc restArgs*(args: openArray[Value], i: int): Value =
   if i >= args.len: return NilV
-  mkList(args[i .. ^1])
+  mkList(@(args[i .. ^1]))
 
-proc arity*(name: string, args: seq[Value], n: int) =
+proc arity*(name: string, args: openArray[Value], n: int) =
   if args.len != n:
     err("Wrong number of args (" & $args.len & ") passed to " & name)
 
@@ -782,7 +788,7 @@ proc toSeq*(v: Value): seq[Value] =
     r
   else: err("Don't know how to create seq from: " & prStr(v))
 
-let emptyArgs*: seq[Value] = @[]
+let emptyArgs*: array[0, Value] = []
 
 ## True while a var still holds the exact fn a call site was compiled against.
 ## Call sites that bind a known-arity fn or an inlined primitive directly guard
