@@ -7,180 +7,14 @@
 ## entry carries an `ord` stamp and iteration sorts by it — so printing and
 ## `keys`/`vals` stay predictable the way Clojure's small array-maps are.
 import std/[tables, strutils, hashes, bitops, algorithm]
+import runtime_types
+export runtime_types
 
 const
   Bits = 5
   Width = 1 shl Bits   # 32
   Mask = Width - 1
   MaxShift = 30        # beyond this a HAMT runs out of hash bits
-
-type
-  Kind* = enum
-    kNil, kBool, kInt, kFloat, kStr, kKeyword, kSymbol,
-    kList, kVector, kMap, kSet, kCons, kChunk, kLazy, kFn
-
-  VNode* = ref object
-    ## A trie node: leaves hold values, internal nodes hold children.
-    case leaf*: bool
-    of true: vals*: seq[Value]
-    of false: kids*: seq[VNode]
-
-  PVec* = object
-    cnt*: int          ## total element count
-    shift*: int        ## bit offset of the root level
-    root*: VNode       ## internal node (never nil)
-    tail*: seq[Value]  ## up to 32 trailing elements, not yet in the trie
-
-  MEntry* = object
-    key*, val*: Value
-    ord*: int          ## insertion stamp, for stable iteration order
-
-  MSlotKind* = enum msEntry, msNode
-  MSlot* = object
-    case sk*: MSlotKind
-    of msEntry: e*: MEntry
-    of msNode: node*: MNode
-
-  MNode* = ref object
-    ## Bitmap-indexed node, or — once the hash bits run out — a linear
-    ## collision bucket.
-    case collision*: bool
-    of false:
-      bitmap*: uint32
-      slots*: seq[MSlot]
-    of true:
-      kvs*: seq[MEntry]
-
-  PMap* = object
-    root*: MNode       ## nil when empty
-    cnt*: int
-    nextOrd*: int
-
-  RecipeKind* = enum rkRange, rkMap, rkFilter
-
-  Recipe* = ref object
-    ## What a lazy seq would produce, described rather than built. A consumer
-    ## that is going to realize everything anyway (reduce, count) can read this
-    ## and run the whole pipeline as a single loop, allocating no intermediate
-    ## chunks at all. Consumers that stop early ignore it and take the ordinary
-    ## lazy path, so laziness is unaffected.
-    case rk*: RecipeKind
-    of rkRange:
-      lo*, hi*, step*: int64
-      bounded*: bool
-    of rkMap, rkFilter:
-      rfn*: Value
-      keep*: bool          ## rkFilter: keep matches, or drop them
-      src*: Value
-
-  Obj* = ref ValueObj
-  ## Value itself is not a ref: nil, bool, int and float live entirely in the
-  ## word below, so arithmetic and a numeric sequence never touch the heap. Only
-  ## the kinds with a real payload allocate a ValueObj, which is also what keeps
-  ## a lazy seq's memoisation working -- `force` mutates through `obj`, which is
-  ## still shared by every Value that names it.
-  ValueObj* = object
-    case kind*: Kind
-    of kNil, kBool, kInt, kFloat: discard
-    of kStr, kKeyword, kSymbol: s*: string
-    of kList: xs*: seq[Value]
-    of kVector: vec*: PVec
-    of kMap, kSet: m*: PMap
-    of kCons:
-      head*: Value
-      tl*: Value       ## rest of the seq: a cons, a lazy seq, a coll, or nil
-    of kChunk:
-      ## A run of elements already realized together, plus the rest of the seq.
-      ## One of these per 32 elements replaces 32 cons cells and 32 thunks.
-      chunk*: seq[Value]
-      coff*: int       ## index of the first element not yet consumed
-      ctl*: Value      ## rest of the seq beyond this run
-    of kLazy:
-      thunk*: proc (): Value {.closure.}
-      cached*: Value
-      forced*: bool
-      rec*: Recipe       ## nil unless this seq is a describable pipeline stage
-    of kFn:
-      fn*: proc (args: openArray[Value]): Value {.closure.}
-      name*: string
-
-  Value* = object
-    kind*: Kind
-    raw*: int64        ## int payload; a float is bit-cast into it; bool is 0/1
-    obj*: Obj          ## nil for the scalar kinds
-
-  CljError* = object of CatchableError
-
-# Field accessors, named so the rest of the codebase keeps reading `v.i`,
-# `v.xs`, `v.head` exactly as it did when Value was a ref to the variant.
-proc i*(v: Value): int64 {.inline.} = v.raw
-proc b*(v: Value): bool {.inline.} = v.raw != 0
-proc f*(v: Value): float64 {.inline.} = cast[float64](v.raw)
-proc s*(v: Value): lent string {.inline.} = v.obj.s
-proc xs*(v: Value): lent seq[Value] {.inline.} = v.obj.xs
-proc vec*(v: Value): lent PVec {.inline.} = v.obj.vec
-proc m*(v: Value): lent PMap {.inline.} = v.obj.m
-proc head*(v: Value): lent Value {.inline.} = v.obj.head
-proc tl*(v: Value): lent Value {.inline.} = v.obj.tl
-proc chunk*(v: Value): lent seq[Value] {.inline.} = v.obj.chunk
-proc coff*(v: Value): int {.inline.} = v.obj.coff
-proc ctl*(v: Value): lent Value {.inline.} = v.obj.ctl
-proc cached*(v: Value): lent Value {.inline.} = v.obj.cached
-proc forced*(v: Value): bool {.inline.} = v.obj.forced
-proc thunk*(v: Value): auto {.inline.} = v.obj.thunk
-proc fn*(v: Value): auto {.inline.} = v.obj.fn
-proc name*(v: Value): lent string {.inline.} = v.obj.name
-
-## A Value is never a nil pointer now, but every `v.isNil` in the codebase
-## meant "is this the nil value", so keep the spelling working.
-proc isNil*(v: Value): bool {.inline.} = v.kind == kNil
-
-# ------------------------------------------------------------ teardown
-## A realized lazy seq is a chain of `cons -> lazy -> cons -> …` refs, and ARC
-## frees a chain by recursing into it — a million-element seq means a million
-## destructor frames, i.e. a segfault at scope exit. So `kCons`/`kLazy` hand
-## their tail to a worklist instead of letting the field drop inline, and the
-## outermost destructor drains it in a loop. Nothing shared is mutated: a node
-## another seq still holds simply survives with its refcount intact.
-##
-## Defining `=destroy` means the compiler stops generating field teardown for
-## `ValueObj`, so every branch below has to release its own fields.
-
-var pendingFree: seq[Value] = @[]
-var draining = false
-
-proc `=destroy`*(x: var ValueObj) =
-  case x.kind
-  of kStr, kKeyword, kSymbol: `=destroy`(x.s)
-  of kList: `=destroy`(x.xs)
-  of kVector: `=destroy`(x.vec)
-  of kMap, kSet: `=destroy`(x.m)
-  of kFn:
-    `=destroy`(x.fn)
-    `=destroy`(x.name)
-  of kCons:
-    `=destroy`(x.head)
-    if not x.tl.isNil: pendingFree.add x.tl   # +1, outlives the release below
-    `=destroy`(x.tl)
-  of kChunk:
-    `=destroy`(x.chunk)
-    if not x.ctl.isNil: pendingFree.add x.ctl
-    `=destroy`(x.ctl)
-  of kLazy:
-    `=destroy`(x.thunk)
-    if not x.cached.isNil: pendingFree.add x.cached
-    `=destroy`(x.cached)
-  of kNil, kBool, kInt, kFloat: discard
-  if draining: return
-  draining = true
-  while pendingFree.len > 0:
-    let v = pendingFree.pop()
-    discard v      # dies here: its own tail is queued, not recursed into
-  draining = false
-
-let NilV* = Value(kind: kNil)
-let TrueV* = Value(kind: kBool, raw: 1)
-let FalseV* = Value(kind: kBool, raw: 0)
 
 proc err*(msg: string) {.noreturn.} = raise newException(CljError, msg)
 
@@ -769,11 +603,6 @@ proc str*(v: Value): string = toStr(v, false)
 ## Vars are cells, as in Clojure: compiled code resolves the cell once and
 ## reads through it, so a call site costs one pointer deref, not a hash lookup,
 ## while `def` can still rebind the var later.
-type VarCell* = ref object
-  name*: string
-  bound*: bool
-  v*: Value
-
 var globals*: Table[string, VarCell] = initTable[string, VarCell]()
 
 proc varCell*(name: string): VarCell =
@@ -842,8 +671,6 @@ proc toSeq*(v: Value): seq[Value] =
     for e in mapEntries(v.m): r.add mkVector(@[e.key, e.val])
     r
   else: err("Don't know how to create seq from: " & prStr(v))
-
-let emptyArgs*: array[0, Value] = []
 
 ## True while a var still holds the exact fn a call site was compiled against.
 ## Call sites that bind a known-arity fn or an inlined primitive directly guard

@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Linux x86_64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Resolve release tag
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9] ]]; then
+            echo "Release tags must start with a version such as v0.1.0" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: "2.2.12"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run test suite
+        run: ./run-tests.sh
+
+      - name: Build optimized compiler
+        run: |
+          mkdir -p lib
+          nim c --app:staticlib --nimMainPrefix:ClonimRuntime \
+            --hints:off --warnings:off --nimcache:lib/nimcache-debug \
+            -o:lib/libclonim_runtime_debug.a src/runtime_lib.nim
+          nim c -d:release --app:staticlib --nimMainPrefix:ClonimRuntime \
+            --hints:off --warnings:off --nimcache:lib/nimcache-release \
+            -o:lib/libclonim_runtime.a src/runtime_lib.nim
+          nim c -d:release --hints:off --warnings:off \
+            -o:bin/clonim src/clonim.nim
+
+      - name: Package release
+        env:
+          ARCHIVE_ROOT: clonim-linux-x86_64
+        run: |
+          install -Dm755 bin/clonim "dist/$ARCHIVE_ROOT/bin/clonim"
+          install -Dm644 lib/libclonim_runtime.a \
+            "dist/$ARCHIVE_ROOT/lib/libclonim_runtime.a"
+          install -Dm644 lib/libclonim_runtime_debug.a \
+            "dist/$ARCHIVE_ROOT/lib/libclonim_runtime_debug.a"
+          install -Dm644 src/app_runtime.nim \
+            "dist/$ARCHIVE_ROOT/src/app_runtime.nim"
+          install -Dm644 src/runtime_types.nim \
+            "dist/$ARCHIVE_ROOT/src/runtime_types.nim"
+          cp -R stdlib "dist/$ARCHIVE_ROOT/stdlib"
+          cp README.md "dist/$ARCHIVE_ROOT/README.md"
+          tar -C dist -czf "dist/$ARCHIVE_ROOT.tar.gz" "$ARCHIVE_ROOT"
+          cd dist
+          sha256sum "$ARCHIVE_ROOT.tar.gz" > "$ARCHIVE_ROOT.tar.gz.sha256"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          assets=(
+            dist/clonim-linux-x86_64.tar.gz
+            dist/clonim-linux-x86_64.tar.gz.sha256
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --verify-tag \
+              --generate-notes \
+              --title "$TAG"

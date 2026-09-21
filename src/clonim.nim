@@ -3,7 +3,7 @@
 ##   clonim run   foo.clj          compile and run
 ##   clonim build foo.clj [-o bin] compile to a native binary
 ##   clonim emit  foo.clj          print the generated Nim
-import std/[hashes, os, osproc, strutils, times]
+import std/[hashes, os, osproc, sequtils, strutils, times]
 import runtime, compiler
 
 proc usage() =
@@ -22,14 +22,43 @@ options:
   quit(1)
 
 proc srcDir(): string =
-  ## where runtime.nim / core.nim live, so generated code can import them
+  ## Where generated programs find the private runtime interface.
   for cand in [getAppDir(), getAppDir().parentDir / "src",
                getAppDir().parentDir.parentDir / "src"]:
-    if fileExists(cand / "runtime.nim"): return cand
+    if fileExists(cand / "app_runtime.nim"): return cand
   getAppDir()
 
+proc runtimeLib(release: bool): string =
+  ## Release archives place the private runtime beside bin/. A source checkout
+  ## builds the same archive into lib/ on first use.
+  let libName = (if release: "libclonim_runtime.a" else: "libclonim_runtime_debug.a")
+  let installed = getAppDir().parentDir / "lib" / libName
+  let source = srcDir() / "runtime_lib.nim"
+  if fileExists(installed):
+    if not fileExists(source): return installed
+    var stale = false
+    for f in walkFiles(srcDir() / "*.nim"):
+      if getLastModificationTime(f) > getLastModificationTime(installed):
+        stale = true
+        break
+    if not stale: return installed
+  if not fileExists(source):
+    raise newException(IOError, "missing private runtime library: " & installed)
+  createDir(installed.parentDir)
+  var args = @["nim", "c", "--app:staticlib", "--nimMainPrefix:ClonimRuntime",
+               "--hints:off", "--warnings:off", "--path:" & srcDir(),
+               "--nimcache:" & installed.parentDir /
+                 (if release: "nimcache-release" else: "nimcache-debug"),
+               "-o:" & installed]
+  if release: args.add "-d:release"
+  args.add source
+  let (output, code) = execCmdEx(args.mapIt(quoteShell(it)).join(" "))
+  if code != 0:
+    raise newException(IOError, "failed to build private runtime library\n" & output)
+  installed
 
-proc buildKey(nimSrc: string, release: bool): string =
+
+proc buildKey(nimSrc: string, release: bool, rtLib: string): string =
   ## Identifies everything the produced binary depends on. Any change here
   ## invalidates the cached binary for a source file.
   var h: Hash = hash(nimSrc) !& hash(release)
@@ -39,6 +68,7 @@ proc buildKey(nimSrc: string, release: bool): string =
   let nimExe = findExe("nim")
   if nimExe.len > 0:
     h = h !& hash($getLastModificationTime(nimExe))
+  h = h !& hash($getLastModificationTime(rtLib))
   $(!$h)
 
 proc main() =
@@ -111,15 +141,22 @@ proc main() =
 
   # Even a warm nimcache costs a second or so of semantic checking and linking.
   # `run` skips the backend entirely when nothing that feeds the binary has
-  # changed: the generated Nim, the runtime/core sources it imports, the build
-  # flags, and the Nim compiler itself.
+  # changed: the generated Nim, private runtime archive/interface, build flags,
+  # and the Nim compiler itself.
   let stamp = work / "stamp"
+  var rtLib = ""
+  try:
+    rtLib = runtimeLib(release)
+  except IOError, OSError:
+    stderr.writeLine("clonim: " & getCurrentExceptionMsg())
+    quit(1)
   let cached = cmd == "run" and fileExists(outBin) and fileExists(stamp) and
-               readFile(stamp) == buildKey(nimSrc, release)
+               readFile(stamp) == buildKey(nimSrc, release, rtLib)
 
   var nimCmd = @["nim", "c", "--hints:off", "--warnings:off",
                  "--path:" & srcDir(), "--nimcache:" & (work / "cache"),
-                 "-o:" & outBin]
+                 "--passL:-Wl,--allow-multiple-definition", "--passL:" & rtLib,
+                 "--passL:-lm", "-o:" & outBin]
   if release: nimCmd.add "-d:release"
   nimCmd.add nimFile
   if verbose and not cached: echo "clonim: " & nimCmd.join(" ")
@@ -129,7 +166,7 @@ proc main() =
   var code = 0
   if not cached:
     (output, code) = execCmdEx(nimCmd.join(" "))
-    if code == 0: writeFile(stamp, buildKey(nimSrc, release))
+    if code == 0: writeFile(stamp, buildKey(nimSrc, release, rtLib))
   let tBuild = epochTime() - t1
   if code != 0:
     stderr.writeLine("clonim: Nim backend failed\n" & output)

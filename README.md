@@ -23,6 +23,14 @@ and flags slowdowns above 10% versus the latest compatible run. Requires Jolt
 and a clean working tree. Use `just bench-store 15` to change the threshold;
 see [benchmark history](bench/README.md) for metrics and exit codes.
 
+`just release` also builds clonim's private static runtime archives. Generated
+programs link the matching debug or release archive, so their finished binaries
+are standalone. Version tags matching `v*` trigger the release workflow, which
+runs the test suite and publishes a Linux x86_64 bundle plus its SHA-256 file to
+GitHub Releases. The bundle contains the compiler, both internal runtime
+archives, their small Nim interface, and the clonim source-level standard
+library; users still need Nim installed as the native-code backend.
+
 Source-level libraries are loaded explicitly. Use
 `(require '[clonim.core :refer [now-ms]])` to load `stdlib/clonim/core.clj`. Host-dependent operations remain small runtime primitives; for
 example, the stdlib `now-ms` function wraps the `*epoch-time-ms*` primitive.
@@ -62,7 +70,7 @@ Missing dependencies, missing vars, and dependency cycles produce errors.
 |---|---|---|
 | reader | `src/reader.nim` | text → data. Forms *are* runtime values (homoiconic), as in Clojure |
 | analyzer + codegen | `src/compiler.nim` | expands the macro set to core special forms, emits Nim statements |
-| runtime | `src/runtime.nim` | the `Value` tagged union, the persistent vector/map, equality, printing, var cells, `call` |
+| runtime | `src/runtime.nim` | the `Value` tagged union, the persistent vector/map, equality, printing, var cells, `call`; precompiled into a private static archive |
 | core | `src/core.nim` | ~140 `clojure.core` builtins as Nim closures |
 | stdlib | `stdlib/clonim/core.clj` | source-level helpers loaded by explicit require |
 | driver | `src/clonim.nim` | shells out to `nim c`, times each phase |

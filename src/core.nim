@@ -348,11 +348,6 @@ proc def(name: string, f: proc (args: openArray[Value]): Value {.closure.}) =
 ## Each base element is pushed through the stages and whatever survives is
 ## folded, so no chunk, cursor or intermediate seq is built between stages.
 
-type FusedOp* = object
-  isMap*: bool     ## map when true, filter when false
-  fn*: Value
-  keep*: bool      ## filter: keep matches, or drop them
-
 template pushThrough(ops: openArray[FusedOp], x0: Value, emit: untyped) =
   ## Stages arrive outermost-first, so they apply in reverse.
   var it {.inject.} = x0

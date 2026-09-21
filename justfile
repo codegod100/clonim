@@ -6,8 +6,14 @@ bin := "bin/clonim"
 build:
     nim c --hints:off --warnings:off -o:{{bin}} src/clonim.nim
 
+# Build the private static runtime in both modes used by the driver.
+runtime-libs:
+    mkdir -p lib
+    nim c --app:staticlib --nimMainPrefix:ClonimRuntime --hints:off --warnings:off --nimcache:lib/nimcache-debug -o:lib/libclonim_runtime_debug.a src/runtime_lib.nim
+    nim c -d:release --app:staticlib --nimMainPrefix:ClonimRuntime --hints:off --warnings:off --nimcache:lib/nimcache-release -o:lib/libclonim_runtime.a src/runtime_lib.nim
+
 # Build with optimisations on (compiler and, via -d:release, the programs it emits)
-release:
+release: runtime-libs
     nim c -d:release --hints:off --warnings:off -o:{{bin}} src/clonim.nim
 
 # Run every example against tests/<name>.expected
