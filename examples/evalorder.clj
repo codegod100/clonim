@@ -1,3 +1,5 @@
+(ns evalorder)
+
 (def log (atom []))
 (defn note [x] (do (reset! log (conj (deref log) x)) x))
 

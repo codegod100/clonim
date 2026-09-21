@@ -540,7 +540,8 @@ proc registerCore*() =
   def "slurp", proc (a: openArray[Value]): Value = mkStr(readFile(a[0].s))
   def "spit", proc (a: openArray[Value]): Value =
     writeFile(a[0].s, str(a[1])); NilV
-  def "now-ms", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))
+  # Host primitive used by the source-level stdlib's now-ms wrapper.
+  def "*epoch-time-ms*", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))
 
   # ---- collections
   def "list", proc (a: openArray[Value]): Value = mkList(a)

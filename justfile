@@ -28,8 +28,8 @@ compile file: build
 
 # Benchmarks: persistent-collection writes, and lazy early exit
 bench: release
-    ./{{bin}} run examples/persistent-bench.clj -d
-    ./{{bin}} run examples/lazy-bench.clj -d
+    ./{{bin}} run examples/persistent_bench.clj -d
+    ./{{bin}} run examples/lazy_bench.clj -d
 
 # Re-record tests/<name>.expected from current output
 accept: build

@@ -1,3 +1,6 @@
+(ns persistent-bench
+  (:require [clonim.core :refer [now-ms]]))
+
 (def n 20000)
 (let [t0 (now-ms)
       v  (reduce conj [] (range n))

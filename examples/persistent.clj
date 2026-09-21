@@ -1,3 +1,5 @@
+(ns persistent)
+
 ;; build a big vector by conj, then read it back
 (def n 5000)
 (def v (reduce conj [] (range n)))

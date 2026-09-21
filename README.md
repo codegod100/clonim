@@ -23,6 +23,39 @@ and flags slowdowns above 10% versus the latest compatible run. Requires Jolt
 and a clean working tree. Use `just bench-store 15` to change the threshold;
 see [benchmark history](bench/README.md) for metrics and exit codes.
 
+Source-level libraries are loaded explicitly. Use
+`(require '[clonim.core :refer [now-ms]])` to load `stdlib/clonim/core.clj`. Host-dependent operations remain small runtime primitives; for
+example, the stdlib `now-ms` function wraps the `*epoch-time-ms*` primitive.
+
+## Namespaces and libraries
+
+Each file may start with a namespace declaration:
+
+```clojure
+(ns demo.main
+  (:require [clonim.core :as clock]))
+
+(println (clock/now-ms))
+```
+
+Top-level `(require 'clonim.core)` loads the library without importing names;
+use `clonim.core/now-ms`, an `:as` alias, or an explicit `:refer [now-ms]`.
+Definitions belong to their namespace (`user` for scripts without `ns`).
+Locals shadow vars, and normal core functions resolve to `clojure.core`.
+Forward references require `declare`. A later `def +` creates a var in the
+current namespace rather than changing already-resolved core references.
+
+Libraries are loaded once, before their dependents. Namespace names map to paths
+with dots as separators and hyphens as underscores. Add search roots with the
+repeatable `--source-path <directory>` CLI option; these precede the working
+directory, input file's directory, and bundled `stdlib/`. Libraries are never
+loaded implicitly merely because their source root is available.
+
+This is a static subset: one leading `ns` per file, literal top-level `require`,
+`:as`, explicit `:refer`, and `defn-` privacy. Dynamic namespace operations,
+reload options, `:refer :all`, and arbitrary macro expansion are unsupported.
+Missing dependencies, missing vars, and dependency cycles produce errors.
+
 ## Pipeline
 
 | stage | file | what it does |
@@ -31,6 +64,7 @@ see [benchmark history](bench/README.md) for metrics and exit codes.
 | analyzer + codegen | `src/compiler.nim` | expands the macro set to core special forms, emits Nim statements |
 | runtime | `src/runtime.nim` | the `Value` tagged union, the persistent vector/map, equality, printing, var cells, `call` |
 | core | `src/core.nim` | ~140 `clojure.core` builtins as Nim closures |
+| stdlib | `stdlib/clonim/core.clj` | source-level helpers loaded by explicit require |
 | driver | `src/clonim.nim` | shells out to `nim c`, times each phase |
 
 Codegen is statement-oriented: every form is compiled as "emit statements that
@@ -59,7 +93,7 @@ Maps and sets also keep insertion order: each entry carries an `ord` stamp and
 iteration sorts by it, so printing, `keys` and `vals` are deterministic the way
 Clojure's small array-maps are, without giving up hashed lookup.
 
-`examples/persistent-bench.clj` (`just bench`), n = 8000, `-d:release`:
+`examples/persistent_bench.clj` (`just bench`), n = 8000, `-d:release`:
 
 | operation | copy-on-write `seq` | trie / HAMT |
 |---|---:|---:|
@@ -127,11 +161,12 @@ library above returns them where Clojure does.
   chunking is the fix, at the cost of exact demand.
 - **Destructuring in parameter lists.** `(let [[a b] xs] …)` works; `(defn f
   [[a b]] …)` does not.
-- Protocols/records, namespaces (`ns` is parsed and ignored), refs/agents,
+- Protocols/records, dynamic namespace operations, refs/agents,
   `#()` literals, syntax-quote, transducers, Nim interop.
 
 ## Tests
 
 ```bash
 ./run-tests.sh   # builds the compiler, diffs every example against tests/*.expected
+nim r --path:src tests/test_namespaces.nim  # namespace resolution and loader tests
 ```

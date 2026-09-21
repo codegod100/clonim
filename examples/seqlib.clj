@@ -1,3 +1,5 @@
+(ns seqlib)
+
 ;; range: arities, steps, empty and negative
 (println (range 5) (range 2 5) (range 0 10 3) (range 5 0 -2))
 (println (range 0) (range 5 5) (range 5 0) (range 0 5 -1))

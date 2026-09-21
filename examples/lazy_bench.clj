@@ -1,3 +1,6 @@
+(ns lazy-bench
+  (:require [clonim.core :refer [now-ms]]))
+
 (def n 2000000)
 (let [t0 (now-ms)
       a  (first (filter odd? (map inc (range n))))

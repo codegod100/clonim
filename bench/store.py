@@ -2,12 +2,10 @@
 """Record and commit a benchmark run; exit 1 after committing a regression."""
 
 import argparse
-
 import hashlib
 import json
 import math
 import os
-
 import platform
 import shutil
 import subprocess

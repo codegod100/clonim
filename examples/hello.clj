@@ -1,3 +1,5 @@
+(ns hello)
+
 ;; a first taste
 (defn greet [name]
   (str "Hello, " name "!"))

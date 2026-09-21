@@ -1,3 +1,5 @@
+(ns fusion)
+
 ;; results must match whether or not the pipeline fuses
 (println (reduce + (map (fn [x] (* x x)) (filter even? (range 20)))))    ; 1140
 (println (reduce + 1000 (map inc (filter odd? (range 10)))))             ; 1000+2+4+6+8+10=1030
@@ -29,8 +31,8 @@
 (println (deref log))                                        ; (:f :g :p :src)
 
 ;; shadowing and rebinding must defeat fusion, not break it
-(println (let [map (fn [f c] [99])] (reduce + (map inc [1 2 3]))))   ; 99
+(println (let [map (fn [_f _c] [99])] (reduce + (map inc [1 2 3]))))   ; 99
 
 ;; a def of one of the pipeline names defeats fusion for the whole program
-(def map (fn [f c] [:replaced]))
+(def map (fn [_f _c] [:replaced]))
 (println (reduce conj [] (map inc [1 2 3])))                 ; [:replaced]

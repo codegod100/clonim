@@ -16,6 +16,7 @@ usage:
 
 options:
   -o <path>   output binary path (build)
+  --source-path <path>  add a library source root (repeatable)
   -v          show the nim build command and timings
   -d          build with -d:release (default for build, off for run)"""
   quit(1)
@@ -27,10 +28,12 @@ proc srcDir(): string =
     if fileExists(cand / "runtime.nim"): return cand
   getAppDir()
 
+
 proc buildKey(nimSrc: string, release: bool): string =
   ## Identifies everything the produced binary depends on. Any change here
   ## invalidates the cached binary for a source file.
   var h: Hash = hash(nimSrc) !& hash(release)
+
   for f in walkFiles(srcDir() / "*.nim"):
     h = h !& hash(readFile(f))
   let nimExe = findExe("nim")
@@ -50,6 +53,7 @@ proc main() =
   var outBin = ""
   var verbose = false
   var release = cmd == "build"
+  var sourceRoots: seq[string] = @[]
   var i = 2
   while i < argv.len:
     case argv[i]
@@ -57,6 +61,10 @@ proc main() =
       inc i
       if i >= argv.len: usage()
       outBin = argv[i]
+    of "--source-path":
+      inc i
+      if i >= argv.len: usage()
+      sourceRoots.add argv[i].absolutePath
     of "-v": verbose = true
     of "-d": release = true
     else: usage()
@@ -65,9 +73,12 @@ proc main() =
   let t0 = epochTime()
   var nimSrc = ""
   try:
-    nimSrc = compileSource(readFile(file))
-  except CljError as e:
-    stderr.writeLine("clonim: " & e.msg)
+    # Source-level libraries are loaded only by an explicit require form.
+    sourceRoots.add @[getCurrentDir(), file.absolutePath.parentDir,
+                      srcDir().parentDir / "stdlib"]
+    nimSrc = compileSource(readFile(file), sourceRoots)
+  except CljError, IOError, OSError:
+    stderr.writeLine("clonim: " & getCurrentExceptionMsg())
     quit(1)
   let tCompile = epochTime() - t0
 

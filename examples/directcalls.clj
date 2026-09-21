@@ -1,3 +1,5 @@
+(ns directcalls)
+
 (defn f [x] (* x 2))
 (println (f 5))
 (def f (fn [x] (+ x 100)))
@@ -15,6 +17,7 @@
 (defn fact [n] (if (< n 2) 1 (* n (fact (- n 1)))))
 (println (fact 10))                  ; 3628800
 
+(declare od?)
 (defn ev? [n] (if (= n 0) true (od? (- n 1))))
 (defn od? [n] (if (= n 0) false (ev? (- n 1))))
 (println (ev? 10) (od? 7))           ; true true

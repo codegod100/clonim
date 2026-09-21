@@ -4,7 +4,7 @@
 ## special forms (everything else is expanded), then emit host-language code
 ## and let the host compiler do register allocation, inlining and codegen.
 import std/[tables, strutils, sets]
-import runtime, reader
+import runtime, namespaces
 
 type
   ## A fn whose arity is known at the call site, so it can be reached as a
@@ -75,10 +75,15 @@ proc lookupDirect(env: Env, name: string, arity: int): Direct =
     e = e.parent
   Direct()
 
+proc coreName(name: string): string =
+  ## Normalize only core names for dispatch, never var or local identity.
+  ## Other namespaces must not acquire core optimizations by basename.
+  if name.startsWith("clojure.core/"): name[13 .. ^1] else: name
+
 proc primStable(c: Ctx, name: string): bool =
-  ## A core builtin still holds its registerCore value everywhere: no def in
-  ## this program targets the name at all.
-  c.defCounts[name] == 0
+  ## The runtime bridge aliases both core spellings to the same cell.
+  let base = coreName(name)
+  c.defCounts[base] == 0 and c.defCounts["clojure.core/" & base] == 0
 
 proc fnStable(c: Ctx, name: string): bool =
   ## A user fn is reached by exactly one definition, so the one a call site was
@@ -308,10 +313,10 @@ proc collectRecurs(forms: seq[Value], into: var seq[seq[Value]]) =
     if f.isNil or f.kind != kList or f.items.len == 0: continue
     let head = f.items[0]
     if head.kind == kSymbol:
-      if head.s == "recur":
+      if coreName(head.s) == "recur":
         into.add f.items[1 .. ^1]
         continue
-      if head.s in ["loop", "loop*", "fn", "fn*", "defn", "defn-"]: continue
+      if coreName(head.s) in ["loop", "loop*", "fn", "fn*", "defn", "defn-"]: continue
     collectRecurs(f.items, into)
 
 proc usesIntPrim(c: Ctx, forms: seq[Value]): bool =
@@ -322,8 +327,8 @@ proc usesIntPrim(c: Ctx, forms: seq[Value]): bool =
     if f.isNil or f.kind != kList or f.items.len == 0: continue
     let head = f.items[0]
     if head.kind == kSymbol and c.primStable(head.s) and
-       (intOps.hasKey(head.s) or intCalls.hasKey(head.s) or
-        cmpOps.hasKey(head.s) or head.s == "inc" or head.s == "dec"):
+       (intOps.hasKey(coreName(head.s)) or intCalls.hasKey(coreName(head.s)) or
+        cmpOps.hasKey(coreName(head.s)) or coreName(head.s) in ["inc", "dec"]):
       return true
     if usesIntPrim(c, f.items): return true
   false
@@ -495,7 +500,7 @@ proc genLet(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
           lenv.locals[restSym] = id
           break
         let id = c.gensym("l" & mangle(symName(p)))
-        c.line("var " & id & ": Value = call(getVar(\"nth\"), [" & v & ", mkInt(" &
+        c.line("var " & id & ": Value = call(getVar(\"clojure.core/nth\"), [" & v & ", mkInt(" &
                $idx & "), NilV])")
         lenv.locals[symName(p)] = id
         inc idx; inc j
@@ -506,14 +511,14 @@ proc genLet(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
           for ks in valForm.items:
             let nm = symName(ks)
             let id = c.gensym("l" & mangle(nm))
-            c.line("var " & id & ": Value = call(getVar(\"get\"), [" & v &
+            c.line("var " & id & ": Value = call(getVar(\"clojure.core/get\"), [" & v &
                    ", mkKeyword(" & nimStr(nm) & ")])")
             lenv.locals[nm] = id
         else:
           let nm = symName(k)
           let id = c.gensym("l" & mangle(nm))
           let kv = genExpr(valForm, lenv, c)
-          c.line("var " & id & ": Value = call(getVar(\"get\"), [" & v & ", " & kv & "])")
+          c.line("var " & id & ": Value = call(getVar(\"clojure.core/get\"), [" & v & ", " & kv & "])")
           lenv.locals[nm] = id
     else:
       err("Unsupported binding form: " & prStr(target))
@@ -589,15 +594,15 @@ proc fusableStage(c: Ctx, env: Env, f: Value): bool =
   if f.kind != kList or f.items.len != 3: return false
   let h = f.items[0]
   if h.kind != kSymbol: return false
-  if h.s notin ["map", "filter", "remove"]: return false
+  if coreName(h.s) notin ["map", "filter", "remove"]: return false
   env.lookup(h.s).len == 0 and c.primStable(h.s)
 
 proc fusableCall(c: Ctx, env: Env, head: string, args: seq[Value]): bool =
   ## Whether this is a pipeline tryFuse will take.
   if env.lookup(head).len > 0 or not c.primStable(head): return false
   var collIdx = -1
-  if head == "reduce" and args.len in {2, 3}: collIdx = args.len - 1
-  elif head == "count" and args.len == 1: collIdx = 0
+  if coreName(head) == "reduce" and args.len in {2, 3}: collIdx = args.len - 1
+  elif coreName(head) == "count" and args.len == 1: collIdx = 0
   else: return false
   c.fusableStage(env, args[collIdx])
 
@@ -609,7 +614,7 @@ proc tryFuse(c: Ctx, env: Env, head: string, args: seq[Value],
   ## memoisation -- which makes it safe to run the whole chain as one loop.
   ## A named pipeline is left alone: `(def ys (map f xs))` must still cache.
   if not c.fusableCall(env, head, args): return false
-  let collIdx = (if head == "count": 0 else: args.len - 1)
+  let collIdx = (if coreName(head) == "count": 0 else: args.len - 1)
 
   # Operands are emitted in source order: the reducing fn, then each stage's
   # fn from outermost in, then the base. That is the order Clojure evaluates
@@ -619,7 +624,7 @@ proc tryFuse(c: Ctx, env: Env, head: string, args: seq[Value],
   var ops: seq[string] = @[]
   var cur = args[collIdx]
   while c.fusableStage(env, cur):
-    let stage = symName(cur.items[0])
+    let stage = coreName(symName(cur.items[0]))
     let fnIdent = genExprTemp(cur.items[1], env, c)
     ops.add(if stage == "map": "FusedOp(isMap: true, fn: " & fnIdent & ")"
             else: "FusedOp(isMap: false, fn: " & fnIdent & ", keep: " &
@@ -627,7 +632,7 @@ proc tryFuse(c: Ctx, env: Env, head: string, args: seq[Value],
     cur = cur.items[2]
   let baseIdent = genExprTemp(cur, env, c)
   let opsLit = "[" & ops.join(", ") & "]"
-  if head == "count":
+  if coreName(head) == "count":
     c.line(dst & " = fusedCount(" & baseIdent & ", " & opsLit & ")")
   elif fixed.len == 1:
     c.line(dst & " = fusedReduce(" & fixed[0] & ", NilV, false, " &
@@ -658,7 +663,7 @@ proc genCall(f: Value, args: seq[Value], dst: string, env: Env, c: Ctx) =
                (if argIdents.len == 0: "emptyArgs" else: "[" & argIdents.join(", ") & "]") & ")")
         c.pop
       return
-    let key = f.s & "/" & $args.len
+    let key = coreName(f.s) & "/" & $args.len
     if intrinsics.hasKey(key) and env.lookup(f.s).len == 0 and
        c.primStable(f.s):
       var argIdents: seq[string] = @[]
@@ -711,7 +716,7 @@ proc intExpr(f: Value, env: Env, c: Ctx): string =
     if head.kind != kSymbol: return ""
     let args = f.items[1 .. ^1]
     # (if c a b) is an int when both arms are
-    if head.s == "if" and args.len == 3:
+    if coreName(head.s) == "if" and args.len == 3:
       let cond = boolExpr(args[0], env, c)
       if cond.len == 0: return ""
       let a = intExpr(args[1], env, c)
@@ -719,20 +724,20 @@ proc intExpr(f: Value, env: Env, c: Ctx): string =
       let b = intExpr(args[2], env, c)
       if b.len == 0: return ""
       return "(if " & cond & ": " & a & " else: " & b & ")"
-    if specialHeads.contains(head.s): return ""
+    if specialHeads.contains(coreName(head.s)): return ""
     if env.lookup(head.s).len == 0 and c.primStable(head.s):
-      if args.len == 2 and (intOps.hasKey(head.s) or intCalls.hasKey(head.s)):
+      if args.len == 2 and (intOps.hasKey(coreName(head.s)) or intCalls.hasKey(coreName(head.s))):
         let a = intExpr(args[0], env, c)
         if a.len == 0: return ""
         let b = intExpr(args[1], env, c)
         if b.len == 0: return ""
-        if intCalls.hasKey(head.s):
-          return intCalls[head.s] & "(" & a & ", " & b & ")"
-        return "(" & a & " " & intOps[head.s] & " " & b & ")"
-      if args.len == 1 and (head.s == "inc" or head.s == "dec"):
+        if intCalls.hasKey(coreName(head.s)):
+          return intCalls[coreName(head.s)] & "(" & a & ", " & b & ")"
+        return "(" & a & " " & intOps[coreName(head.s)] & " " & b & ")"
+      if args.len == 1 and (coreName(head.s) == "inc" or coreName(head.s) == "dec"):
         let a = intExpr(args[0], env, c)
         if a.len == 0: return ""
-        return "(" & a & (if head.s == "inc": " + 1" else: " - 1") & ")"
+        return "(" & a & (if coreName(head.s) == "inc": " + 1" else: " - 1") & ")"
     # a call to an int-specialised fn that returns a raw int64
     let (prc, boxes) = env.lookupIntFn(head.s, args.len)
     if prc.len > 0 and not boxes:
@@ -750,13 +755,13 @@ proc boolExpr(f: Value, env: Env, c: Ctx): string =
   ## A Nim bool expression for a comparison between provable integers.
   if f.kind != kList or f.items.len != 3: return ""
   let head = f.items[0]
-  if head.kind != kSymbol or not cmpOps.hasKey(head.s): return ""
+  if head.kind != kSymbol or not cmpOps.hasKey(coreName(head.s)): return ""
   if env.lookup(head.s).len > 0 or not c.primStable(head.s): return ""
   let a = intExpr(f.items[1], env, c)
   if a.len == 0: return ""
   let b = intExpr(f.items[2], env, c)
   if b.len == 0: return ""
-  "(" & a & " " & cmpOps[head.s] & " " & b & ")"
+  "(" & a & " " & cmpOps[coreName(head.s)] & " " & b & ")"
 
 proc tryExprs(xs: seq[Value], env: Env, c: Ctx, ids: var seq[string]): bool =
   ## All-or-nothing: if any subform needs statements, the caller must fall back
@@ -798,7 +803,7 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
     if f.items.len == 0: return "mkList(newSeq[Value]())"
     let head = f.items[0]
     let args = f.items[1 .. ^1]
-    if head.kind == kSymbol and specialHeads.contains(head.s): return ""
+    if head.kind == kSymbol and specialHeads.contains(coreName(head.s)): return ""
     # A fusable pipeline is compiled as statements, so its operands are
     # evaluated in source order rather than in Nim argument order.
     if head.kind == kSymbol and c.fusableCall(env, head.s, args): return ""
@@ -821,7 +826,7 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
         # a self-call, or a name only one def form ever targets
         return d.prc & "(" & ids.join(", ") & ")"
       if d.prc.len == 0:
-        let key = head.s & "/" & $args.len
+        let key = coreName(head.s) & "/" & $args.len
         if intrinsics.hasKey(key) and env.lookup(head.s).len == 0:
           if c.primStable(head.s):
             return intrinsics[key] & "(" & ids.join(", ") & ")"
@@ -876,7 +881,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
     let args = f.items[1 .. ^1]
     if head.kind == kSymbol and c.tryFuse(env, head.s, args, dst): return
     if head.kind == kSymbol:
-      case head.s
+      case coreName(head.s)
       of "quote":
         c.line(dst & " = " & quoteLit(args[0]))
         return
@@ -1020,12 +1025,12 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
         c.push
         let benv = newEnv(env)
         benv.locals[nm] = id
-        if head.s == "when-let": genBody(args[1 .. ^1], dst, benv, c)
+        if coreName(head.s) == "when-let": genBody(args[1 .. ^1], dst, benv, c)
         else: genInto(args[1], dst, benv, c)
         c.pop
         c.line("else:")
         c.push
-        if head.s == "if-let" and args.len > 2: genInto(args[2], dst, env, c)
+        if coreName(head.s) == "if-let" and args.len > 2: genInto(args[2], dst, env, c)
         else: c.line(dst & " = NilV")
         c.pop
         return
@@ -1129,7 +1134,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
 # ------------------------------------------------------------- entry point
 const preamble = """
 ## Generated by clonim. Do not edit.
-import runtime, core
+import runtime, core, namespaces
 
 proc cljMain() =
 """
@@ -1142,7 +1147,7 @@ proc collectDefs(f: Value, into: var CountTable[string]) =
   ## and lets the analyzer trust `+` to be arithmetic.
   if f.isNil or f.kind != kList or f.items.len == 0: return
   let head = f.items[0]
-  if head.kind == kSymbol and head.s in ["def", "defn", "defn-"] and
+  if head.kind == kSymbol and coreName(head.s) in ["def", "defn", "defn-"] and
      f.items.len > 1 and f.items[1].kind == kSymbol:
     into.inc f.items[1].s
   for x in f.items: collectDefs(x, into)
@@ -1160,7 +1165,7 @@ proc compileForms*(forms: seq[Value]): string =
     c.line("var " & t & ": Value = NilV")
     genInto(f, t, env, c)
     c.line("discard " & t)
-  var src = preamble & "  registerCore()\n" & c.prelude.join("\n") & "\n" &
+  var src = preamble & "  registerCore()\n  registerNamespaceCore()\n" & c.prelude.join("\n") & "\n" &
             c.body.join("\n") & "\n\n"
   src &= """
 when isMainModule:
@@ -1172,5 +1177,5 @@ when isMainModule:
 """
   src
 
-proc compileSource*(src: string): string =
-  compileForms(readAll(src))
+proc compileSource*(src: string, sourceRoots: seq[string] = @[]): string =
+  compileForms(resolveSource(src, sourceRoots))

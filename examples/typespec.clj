@@ -24,7 +24,7 @@
 ;; comparison chain of non-numbers must not become an int compare
 (println (= "a" "a") (= :k :k) (= [1] [1]) (not= 1 2))                     ; true true true true
 ;; division by zero still reports, rather than trapping
-(println (try (quot 1 0) (catch Exception e "caught")))
+(println (try (quot 1 0) (catch Exception _e "caught")))
 ;; a fn whose recur makes a parameter non-integral must not specialise
 (defn k [x n] (if (< n 3) (recur (str x "a") (+ n 1)) x))
 (println (k "" 0))                                                         ; aaa

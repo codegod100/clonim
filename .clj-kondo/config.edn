@@ -1,0 +1,10 @@
+{:config-in-ns
+ {clonim.core {:linters {:unresolved-symbol {:exclude [*epoch-time-ms*]}}}
+  ;; These regression fixtures intentionally redefine vars and shadow core.
+  directcalls {:linters {:redefined-var {:level :off}}}
+  rebinding {:linters {:redefined-var {:level :off}}}
+  intrinsics {:linters {:redefined-var {:level :off}}}
+  ;; Explicit do forms test evaluation order; fusion also rebinds core map.
+  fusion {:linters {:redundant-do {:level :off}
+                    :redefined-var {:level :off}}}
+  evalorder {:linters {:redundant-do {:level :off}}}}}
