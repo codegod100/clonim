@@ -60,6 +60,11 @@ jobs:
       - name: Run test suite
         run: ./run-tests.sh
 
+      - name: Install AppImage build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes file
+
       - name: Build optimized compiler
         run: |
           mkdir -p lib
