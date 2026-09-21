@@ -198,10 +198,11 @@ proc main() =
 
   var nimCmd = @["nim", "c", "--hints:off", "--warnings:off",
                  "--path:" & srcDir(), "--nimcache:" & (work / "cache"),
-                 "--passL:-lm", "-o:" & outBin]
+                 "-o:" & outBin]
   when not defined(releaseCompiler):
     nimCmd.add "--passL:-Wl,--allow-multiple-definition"
     nimCmd.add "--passL:" & rtLib
+  nimCmd.add "--passL:-lm"
   if release: nimCmd.add "-d:release"
   nimCmd.add nimFile
   if verbose and not cached: echo "clonim: " & nimCmd.join(" ")
