@@ -481,6 +481,15 @@ proc javaFormat(fmt: string, args: openArray[Value]): string =
       else: body = " ".repeat(pad) & body
     result.add body
 
+proc writeOut(f: File, s: string) =
+  ## A closed pipe ends the program quietly, the way a tool killed by SIGPIPE
+  ## does, rather than surfacing as an unhandled IOError.
+  try:
+    f.write(s)
+    f.flushFile
+  except IOError:
+    quit(0)
+
 proc currentOut(): File =
   ## Where print and friends write. `binding` can move it to *err*.
   if hasVar("clojure.core/*out*") and equals(getVar("clojure.core/*out*"), mkKeyword("stderr")):
@@ -649,31 +658,27 @@ proc registerCore*() =
   def "println", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add str(x)
-    let f = currentOut()
-    f.write(parts.join(" ") & "\n")
-    f.flushFile
+    writeOut(currentOut(), parts.join(" ") & "\n")
     NilV
   def "prn", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add prStr(x)
-    let f = currentOut()
-    f.write(parts.join(" ") & "\n")
-    f.flushFile
+    writeOut(currentOut(), parts.join(" ") & "\n")
     NilV
   def "print", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add str(x)
-    currentOut().write parts.join(" ")
+    writeOut(currentOut(), parts.join(" "))
     NilV
   def "pr", proc (a: openArray[Value]): Value =
     var parts: seq[string] = @[]
     for x in a: parts.add prStr(x)
-    currentOut().write parts.join(" ")
+    writeOut(currentOut(), parts.join(" "))
     NilV
   def "flush", proc (a: openArray[Value]): Value =
-    currentOut().flushFile; NilV
+    writeOut(currentOut(), ""); NilV
   def "newline", proc (a: openArray[Value]): Value =
-    currentOut().write "\n"; NilV
+    writeOut(currentOut(), "\n"); NilV
   def "name", proc (a: openArray[Value]): Value =
     case a[0].kind
     of kKeyword, kSymbol, kStr: mkStr(a[0].s)
