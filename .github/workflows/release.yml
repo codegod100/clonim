@@ -74,7 +74,11 @@ jobs:
         run: |
           appdir=dist/clonim.AppDir
           install -Dm755 bin/clonim "$appdir/usr/bin/clonim"
-          nim_lib=$(nim dump --hints:off | tail -n 1)
+          nim_lib=$(nim dump --hints:off 2>&1 | grep '^/.*\/lib$' | tail -n 1)
+          test -f "$nim_lib/system.nim" || {
+            echo "Unable to locate Nim's library directory" >&2
+            exit 1
+          }
           nim_root=$(dirname "$nim_lib")
           nim_bin="$nim_root/bin/nim"
           install -Dm755 "$nim_bin" "$appdir/usr/bin/nim"
