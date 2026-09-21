@@ -130,6 +130,13 @@ proc readForm(r: var Reader): Value =
     if r.peek2 == '{':
       discard r.advance; discard r.advance
       return mkSet(r.readDelimited('}'))
+    if r.peek2 == '"':
+      # A Clojure regex literal carries its pattern source at read time.  The
+      # runtime's regular-expression operations accept that source string, so
+      # preserve the usual string escaping while avoiding a JVM-only Pattern
+      # object in the portable value representation.
+      discard r.advance
+      return r.readString
     if r.peek2 == '_':
       discard r.advance; discard r.advance
       discard r.readForm

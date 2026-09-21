@@ -22,6 +22,12 @@ proc rejects(src, message: string, roots: seq[string] = @[]) =
   check rejected
 
 suite "static namespace resolution":
+  test "regex literals preserve their pattern source":
+    let forms = readAll("#\"(?i)^did:[a-z0-9]+:\"")
+    check forms.len == 1
+    check forms[0].kind == kStr
+    check forms[0].s == "(?i)^did:[a-z0-9]+:"
+
   test "definitions resolve sequentially, including core shadowing":
     checkForms("(inc 1) (def inc (fn [x] x)) (inc 2)",
       "(clojure.core/inc 1) (def user/inc (fn [x] x)) (user/inc 2)")
