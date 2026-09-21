@@ -56,13 +56,15 @@ type
     cnt*: int
     nextOrd*: int
 
-  Value* = ref ValueObj
+  Obj* = ref ValueObj
+  ## Value itself is not a ref: nil, bool, int and float live entirely in the
+  ## word below, so arithmetic and a numeric sequence never touch the heap. Only
+  ## the kinds with a real payload allocate a ValueObj, which is also what keeps
+  ## a lazy seq's memoisation working -- `force` mutates through `obj`, which is
+  ## still shared by every Value that names it.
   ValueObj* = object
     case kind*: Kind
-    of kNil: discard
-    of kBool: b*: bool
-    of kInt: i*: int64
-    of kFloat: f*: float64
+    of kNil, kBool, kInt, kFloat: discard
     of kStr, kKeyword, kSymbol: s*: string
     of kList: xs*: seq[Value]
     of kVector: vec*: PVec
@@ -84,7 +86,36 @@ type
       fn*: proc (args: openArray[Value]): Value {.closure.}
       name*: string
 
+  Value* = object
+    kind*: Kind
+    raw*: int64        ## int payload; a float is bit-cast into it; bool is 0/1
+    obj*: Obj          ## nil for the scalar kinds
+
   CljError* = object of CatchableError
+
+# Field accessors, named so the rest of the codebase keeps reading `v.i`,
+# `v.xs`, `v.head` exactly as it did when Value was a ref to the variant.
+proc i*(v: Value): int64 {.inline.} = v.raw
+proc b*(v: Value): bool {.inline.} = v.raw != 0
+proc f*(v: Value): float64 {.inline.} = cast[float64](v.raw)
+proc s*(v: Value): lent string {.inline.} = v.obj.s
+proc xs*(v: Value): lent seq[Value] {.inline.} = v.obj.xs
+proc vec*(v: Value): lent PVec {.inline.} = v.obj.vec
+proc m*(v: Value): lent PMap {.inline.} = v.obj.m
+proc head*(v: Value): lent Value {.inline.} = v.obj.head
+proc tl*(v: Value): lent Value {.inline.} = v.obj.tl
+proc chunk*(v: Value): lent seq[Value] {.inline.} = v.obj.chunk
+proc coff*(v: Value): int {.inline.} = v.obj.coff
+proc ctl*(v: Value): lent Value {.inline.} = v.obj.ctl
+proc cached*(v: Value): lent Value {.inline.} = v.obj.cached
+proc forced*(v: Value): bool {.inline.} = v.obj.forced
+proc thunk*(v: Value): auto {.inline.} = v.obj.thunk
+proc fn*(v: Value): auto {.inline.} = v.obj.fn
+proc name*(v: Value): lent string {.inline.} = v.obj.name
+
+## A Value is never a nil pointer now, but every `v.isNil` in the codebase
+## meant "is this the nil value", so keep the spelling working.
+proc isNil*(v: Value): bool {.inline.} = v.kind == kNil
 
 # ------------------------------------------------------------ teardown
 ## A realized lazy seq is a chain of `cons -> lazy -> cons -> …` refs, and ARC
@@ -130,8 +161,8 @@ proc `=destroy`*(x: var ValueObj) =
   draining = false
 
 let NilV* = Value(kind: kNil)
-let TrueV* = Value(kind: kBool, b: true)
-let FalseV* = Value(kind: kBool, b: false)
+let TrueV* = Value(kind: kBool, raw: 1)
+let FalseV* = Value(kind: kBool, raw: 0)
 
 proc err*(msg: string) {.noreturn.} = raise newException(CljError, msg)
 
@@ -382,27 +413,27 @@ proc mapEntries*(m: PMap): seq[MEntry] =
 
 # ------------------------------------------------------------ constructors
 proc mkBool*(x: bool): Value = (if x: TrueV else: FalseV)
-proc mkInt*(x: int64): Value = Value(kind: kInt, i: x)
-proc mkFloat*(x: float64): Value = Value(kind: kFloat, f: x)
-proc mkStr*(x: string): Value = Value(kind: kStr, s: x)
-proc mkKeyword*(x: string): Value = Value(kind: kKeyword, s: x)
-proc mkSymbol*(x: string): Value = Value(kind: kSymbol, s: x)
-proc mkList*(xs: seq[Value]): Value = Value(kind: kList, xs: xs)
-proc mkVector*(xs: seq[Value]): Value = Value(kind: kVector, vec: toPVec(xs))
-proc mkVec*(v: PVec): Value = Value(kind: kVector, vec: v)
-proc mkMapOf*(m: PMap): Value = Value(kind: kMap, m: m)
-proc mkSetOf*(m: PMap): Value = Value(kind: kSet, m: m)
+proc mkInt*(x: int64): Value {.inline.} = Value(kind: kInt, raw: x)
+proc mkFloat*(x: float64): Value {.inline.} = Value(kind: kFloat, raw: cast[int64](x))
+proc mkStr*(x: string): Value = Value(kind: kStr, obj: Obj(kind: kStr, s: x))
+proc mkKeyword*(x: string): Value = Value(kind: kKeyword, obj: Obj(kind: kKeyword, s: x))
+proc mkSymbol*(x: string): Value = Value(kind: kSymbol, obj: Obj(kind: kSymbol, s: x))
+proc mkList*(xs: seq[Value]): Value = Value(kind: kList, obj: Obj(kind: kList, xs: xs))
+proc mkVector*(xs: seq[Value]): Value = Value(kind: kVector, obj: Obj(kind: kVector, vec: toPVec(xs)))
+proc mkVec*(v: PVec): Value = Value(kind: kVector, obj: Obj(kind: kVector, vec: v))
+proc mkMapOf*(m: PMap): Value = Value(kind: kMap, obj: Obj(kind: kMap, m: m))
+proc mkSetOf*(m: PMap): Value = Value(kind: kSet, obj: Obj(kind: kSet, m: m))
 
 proc mkMap*(ps: seq[(Value, Value)]): Value =
   var m = emptyPMap()
   for (k, v) in ps: m = mapAssoc(m, k, v)
-  Value(kind: kMap, m: m)
+  mkMapOf(m)
 
 proc mkSet*(xs: seq[Value]): Value =
   var m = emptyPMap()
   for x in xs:
     if not mapContains(m, x): m = mapAssoc(m, x, x)
-  Value(kind: kSet, m: m)
+  mkSetOf(m)
 
 # openArray overloads, so a builtin can pass its argument list straight through
 # without first copying it into a seq.
@@ -411,7 +442,7 @@ proc mkVector*(xs: openArray[Value]): Value = mkVector(@xs)
 proc mkSet*(xs: openArray[Value]): Value = mkSet(@xs)
 
 proc mkFn*(name: string, f: proc (args: openArray[Value]): Value {.closure.}): Value =
-  Value(kind: kFn, fn: f, name: name)
+  Value(kind: kFn, obj: Obj(kind: kFn, fn: f, name: name))
 
 # --------------------------------------------------------------- lazy seqs
 ## A lazy seq is a thunk that, when forced, yields either nil/`kNil` (the end)
@@ -421,7 +452,7 @@ proc mkFn*(name: string, f: proc (args: openArray[Value]): Value {.closure.}): V
 ## in core, which is what keeps `(nth (iterate inc 0) 1000000)` from blowing the
 ## stack.
 
-proc mkCons*(h, t: Value): Value = Value(kind: kCons, head: h, tl: t)
+proc mkCons*(h, t: Value): Value = Value(kind: kCons, obj: Obj(kind: kCons, head: h, tl: t))
 
 const ChunkSize* = 32
   ## Elements realized per step by a chunked producer. The same batch size
@@ -431,21 +462,21 @@ const ChunkSize* = 32
 proc mkChunk*(xs: sink seq[Value], off: int, rest: Value): Value =
   ## Normalizes an exhausted chunk away, so a cursor never sees an empty run.
   if off >= xs.len: return (if rest.isNil: NilV else: rest)
-  Value(kind: kChunk, chunk: xs, coff: off, ctl: rest)
+  Value(kind: kChunk, obj: Obj(kind: kChunk, chunk: xs, coff: off, ctl: rest))
 
 proc mkLazy*(f: proc (): Value {.closure.}): Value =
-  Value(kind: kLazy, thunk: f, cached: nil, forced: false)
+  Value(kind: kLazy, obj: Obj(kind: kLazy, thunk: f, cached: NilV, forced: false))
 
 proc force*(v: Value): Value =
   ## Realize one step: follow a chain of lazy seqs down to a cons, a concrete
   ## collection, or the end of the seq.
   var cur = v
-  while not cur.isNil and cur.kind == kLazy:
-    if not cur.forced:
-      cur.cached = cur.thunk()
-      cur.forced = true
-      cur.thunk = nil       # drop the closure so its captures can be collected
-    cur = cur.cached
+  while cur.kind == kLazy:
+    if not cur.obj.forced:
+      cur.obj.cached = cur.obj.thunk()
+      cur.obj.forced = true
+      cur.obj.thunk = nil   # drop the closure so its captures can be collected
+    cur = cur.obj.cached
   cur
 
 proc isSeqNode(v: Value): bool =
@@ -471,17 +502,15 @@ proc cursor*(v: Value): Cursor =
 
 proc hasNext*(c: var Cursor): bool =
   while true:
-    if not c.run.isNil:
+    if c.run.kind == kChunk:
       if c.idx < c.run.chunk.len: return true
-      c.run = nil
+      c.run = NilV
       c.idx = 0
     elif c.idx < c.backing.len:
       return true
-    if c.node.isNil: return false
+    if c.node.kind == kNil: return false
     c.node = force(c.node)
-    if c.node.isNil or c.node.kind == kNil:
-      c.node = nil
-      return false
+    if c.node.kind == kNil: return false
     case c.node.kind
     of kCons:
       return true                     # the element is c.node.head
@@ -495,10 +524,10 @@ proc hasNext*(c: var Cursor): bool =
       # does. Switch to indexing it rather than reporting the seq as finished.
       c.backing = toSeq(c.node)
       c.idx = 0
-      c.node = nil
+      c.node = NilV
 
 proc next*(c: var Cursor): Value =
-  if not c.run.isNil:
+  if c.run.kind == kChunk:
     result = c.run.chunk[c.idx]
     inc c.idx
   elif c.idx < c.backing.len:
@@ -577,7 +606,7 @@ proc hashValue*(v: Value): uint32 =
     for e in mapEntries(v.m):
       h = h xor mixHash(hashValue(e.key), hashValue(e.val))
     h
-  of kFn: uint32(hash(cast[int](cast[pointer](v))))
+  of kFn: uint32(hash(cast[int](cast[pointer](v.obj))))
 
 # --------------------------------------------------------------- accessors
 proc items*(v: Value): seq[Value] =
@@ -620,7 +649,7 @@ proc count*(v: Value): int =
   else: err("Don't know how to count: " & prStr(v))
 
 proc truthy*(v: Value): bool =
-  if v == nil: return false
+  if v.kind == kNil: return false
   case v.kind
   of kNil: false
   of kBool: v.b
@@ -656,7 +685,7 @@ proc equals*(a, b: Value): bool =
     true
   of kMap:
     if a.m.cnt != b.m.cnt: return false
-    let missing = Value(kind: kKeyword, s: "%clonim-missing")
+    let missing = mkKeyword("%clonim-missing")
     for e in mapEntries(a.m):
       if not equals(e.val, mapGet(b.m, e.key, missing)): return false
     true
@@ -746,7 +775,7 @@ proc hasVar*(name: string): bool =
 proc call*(f: Value, args: openArray[Value]): Value =
   if f.isNil: err("Can't call nil")
   case f.kind
-  of kFn: f.fn(args)
+  of kFn: f.obj.fn(args)
   of kKeyword:
     # (:k m) => lookup
     if args.len == 0: err("Wrong number of args to keyword")
