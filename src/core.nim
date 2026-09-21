@@ -1,5 +1,5 @@
 ## clonim core — clojure.core builtins, registered into the global var table.
-import std/[strutils, math, times, random, re]
+import std/[strutils, math, times, random, re, os, httpclient]
 import runtime
 
 proc num(v: Value): float64 =
@@ -544,6 +544,25 @@ proc registerCore*() =
   def "slurp", proc (a: openArray[Value]): Value = mkStr(readFile(a[0].s))
   def "spit", proc (a: openArray[Value]): Value =
     writeFile(a[0].s, str(a[1])); NilV
+  def "*delete-file*", proc (a: openArray[Value]): Value =
+    try:
+      removeFile(a[0].s)
+      TrueV
+    except OSError:
+      if a.len > 1 and truthy(a[1]): FalseV
+      else: raise
+  def "*http-fetch*", proc (a: openArray[Value]): Value =
+    ## Native replacement for the narrow Jolt HTTP API used by Freeqsay.
+    try:
+      let response = newHttpClient().get(a[0].s)
+      writeFile(a[1].s, response.body)
+      mkMap(@[(mkKeyword("outcome"), mkKeyword("ok")),
+              (mkKeyword("status"), mkInt(response.code.int)),
+              (mkKeyword("error"), NilV)])
+    except CatchableError as e:
+      mkMap(@[(mkKeyword("outcome"), mkKeyword("error")),
+              (mkKeyword("status"), mkInt(0)),
+              (mkKeyword("error"), mkStr(e.msg))])
   # Host primitive used by the source-level stdlib's now-ms wrapper.
   def "*epoch-time-ms*", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))
 

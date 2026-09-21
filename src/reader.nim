@@ -1,5 +1,5 @@
 ## clonim reader — text -> data (forms are ordinary runtime Values, as in Clojure).
-import std/[strutils]
+import std/[strutils, sequtils]
 import runtime
 
 type
@@ -7,6 +7,7 @@ type
     src: string
     pos: int
     line: int
+    anonId: int
 
 proc peek(r: Reader): char =
   (if r.pos < r.src.len: r.src[r.pos] else: '\0')
@@ -35,6 +36,18 @@ proc skipWs(r: var Reader) =
       break
 
 proc readForm(r: var Reader): Value
+
+proc replaceAnonArg(v: Value, arg: string): Value =
+  if v.kind == kSymbol and v.s == "%": return mkSymbol(arg)
+  case v.kind
+  of kList: mkList(v.items.mapIt(replaceAnonArg(it, arg)))
+  of kVector: mkVector(v.items.mapIt(replaceAnonArg(it, arg)))
+  of kSet: mkSet(v.items.mapIt(replaceAnonArg(it, arg)))
+  of kMap:
+    var pairs: seq[(Value, Value)]
+    for (k, val) in v.pairs: pairs.add (replaceAnonArg(k, arg), replaceAnonArg(val, arg))
+    mkMap(pairs)
+  else: v
 
 proc readDelimited(r: var Reader, closing: char): seq[Value] =
   result = @[]
@@ -143,7 +156,12 @@ proc readForm(r: var Reader): Value =
       r.skipWs
       return r.readForm
     if r.peek2 == '(':
-      r.readerErr("#() anonymous fn literals are not supported; use (fn [x] ...)")
+      discard r.advance; discard r.advance
+      inc r.anonId
+      let arg = "anon_arg_" & $r.anonId
+      let body = r.readDelimited(')')
+      return mkList(@[mkSymbol("fn"), mkVector(@[mkSymbol(arg)])] &
+                    body.mapIt(replaceAnonArg(it, arg)))
     r.readerErr("Unsupported dispatch: #" & r.peek2
       )
   else:
