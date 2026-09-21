@@ -96,7 +96,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
-          export GH_HOST="${GITHUB_SERVER_URL#https://}"
+          # Rickub runners expose an internal GITHUB_SERVER_URL alias that is
+          # not reachable by `gh` from the job container. Use the public host.
+          export GH_HOST=rickub.com
           assets=(
             dist/clonim-linux-x86_64.tar.gz
             dist/clonim-linux-x86_64.tar.gz.sha256
