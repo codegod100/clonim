@@ -83,10 +83,15 @@ jobs:
           install -Dm755 bin/clonim "$appdir/usr/bin/clonim"
           install -Dm644 lib/libclonim_runtime.a \
             "$appdir/usr/bin/libclonim_runtime.a"
+          nim_bin=$(readlink -f "$(command -v nim)")
+          nim_root=$(dirname "$(dirname "$nim_bin")")
+          install -Dm755 "$nim_bin" "$appdir/usr/bin/nim"
+          cp -a "$nim_root/lib/." "$appdir/usr/lib/"
+          cp -a "$nim_root/config" "$appdir/usr/config"
+          install -Dm755 packaging/appimage/AppRun "$appdir/AppRun"
           install -Dm644 packaging/appimage/clonim.desktop \
             "$appdir/clonim.desktop"
           install -Dm644 packaging/appimage/clonim.svg "$appdir/clonim.svg"
-          ln -s usr/bin/clonim "$appdir/AppRun"
           ln -s clonim.svg "$appdir/.DirIcon"
 
           curl --fail --location --silent --show-error \
@@ -116,9 +121,9 @@ jobs:
             Linux x86_64 release of clonim.
 
             Download the AppImage, make it executable, and run it. It contains
-            both the compiler and its private static runtime. Generated programs
-            statically link the runtime and are standalone. Nim must be installed
-            as the native-code backend.
+            the compiler, Nim 2.2.12, and clonim's private static runtime.
+            Generated programs statically link the runtime and are standalone.
+            A system C compiler and linker are required to build programs.
           draft: false
           prerelease: false
           files: dist/clonim-linux-x86_64.AppImage

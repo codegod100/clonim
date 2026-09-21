@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+appdir=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
+PATH="$appdir/usr/bin:$PATH"
+export PATH
+
+exec "$appdir/usr/bin/clonim" "$@"
