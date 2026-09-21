@@ -87,6 +87,8 @@ proc runtimeLib(release: bool): string =
                "--nimcache:" & installed.parentDir /
                  (if release: "nimcache-release" else: "nimcache-debug"),
                "-o:" & installed]
+  # The HTTP primitive speaks TLS; without this it can only reach http://.
+  args.add "-d:ssl"
   if release: args.add "-d:release"
   args.add source
   let (output, code) = execCmdEx(args.mapIt(quoteShell(it)).join(" "))
@@ -203,6 +205,7 @@ proc main() =
     nimCmd.add "--passL:-Wl,--allow-multiple-definition"
     nimCmd.add "--passL:" & rtLib
   nimCmd.add "--passL:-lm"
+  nimCmd.add "-d:ssl"
   if release:
     # `-d:release` disables Nim runtime checks but keeps DWARF and symbol
     # tables by default. Native deliverables should not carry that metadata.

@@ -1,5 +1,5 @@
 ## clonim reader — text -> data (forms are ordinary runtime Values, as in Clojure).
-import std/[strutils]
+import std/[strutils, sequtils]
 import runtime
 
 type
@@ -7,6 +7,7 @@ type
     src: string
     pos: int
     line: int
+    anonId: int
 
 proc peek(r: Reader): char =
   (if r.pos < r.src.len: r.src[r.pos] else: '\0')
@@ -35,6 +36,42 @@ proc skipWs(r: var Reader) =
       break
 
 proc readForm(r: var Reader): Value
+
+proc anonArgIndex(name: string): int =
+  ## % and %1 are the first argument, %2 the second, and so on. -1 for
+  ## anything that is not an anonymous-argument symbol.
+  if name.len == 0 or name[0] != '%': return -1
+  if name.len == 1: return 1
+  try: parseInt(name[1 .. ^1])
+  except ValueError: -1
+
+proc replaceAnonArg(v: Value, arg: string): Value =
+  if v.kind == kSymbol:
+    let n = anonArgIndex(v.s)
+    if n > 0: return mkSymbol(arg & "_" & $n)
+  case v.kind
+  of kList: mkList(v.items.mapIt(replaceAnonArg(it, arg)))
+  of kVector: mkVector(v.items.mapIt(replaceAnonArg(it, arg)))
+  of kSet: mkSet(v.items.mapIt(replaceAnonArg(it, arg)))
+  of kMap:
+    var pairs: seq[(Value, Value)]
+    for (k, val) in v.pairs: pairs.add (replaceAnonArg(k, arg), replaceAnonArg(val, arg))
+    mkMap(pairs)
+  else: v
+
+proc countAnonArgs(v: Value, arity: var int) =
+  if v.isNil: return
+  if v.kind == kSymbol:
+    let n = anonArgIndex(v.s)
+    if n > arity: arity = n
+    return
+  case v.kind
+  of kList, kVector, kSet:
+    for x in v.items: countAnonArgs(x, arity)
+  of kMap:
+    for (k, val) in v.pairs:
+      countAnonArgs(k, arity); countAnonArgs(val, arity)
+  else: discard
 
 proc readDelimited(r: var Reader, closing: char): seq[Value] =
   result = @[]
@@ -67,6 +104,33 @@ proc readString(r: var Reader): Value =
       s.add c
   mkStr(s)
 
+proc readChar(r: var Reader): Value =
+  ## A character literal: \a, \newline, \uXXXX, or any single character —
+  ## including the delimiters, which never start a name here.
+  discard r.advance # the backslash
+  if r.pos >= r.src.len: r.readerErr("EOF while reading character")
+  let first = r.advance
+  var name = $first
+  if first in Letters or first in Digits:
+    while r.pos < r.src.len:
+      let c = r.peek
+      if c in {' ', '\t', '\n', '\r', ','} or (c in macroChars and c != '\''): break
+      name.add r.advance
+  if name.len == 1: return mkChar(int64(ord(name[0])))
+  case name
+  of "newline": mkChar(10)
+  of "tab": mkChar(9)
+  of "return": mkChar(13)
+  of "space": mkChar(32)
+  of "backspace": mkChar(8)
+  of "formfeed": mkChar(12)
+  else:
+    if name[0] == 'u' and name.len == 5:
+      try: return mkChar(int64(parseHexInt(name[1 .. ^1])))
+      except ValueError: discard
+    r.readerErr("Unsupported character literal: \\" & name)
+    NilV
+
 proc readToken(r: var Reader): string =
   result = ""
   while r.pos < r.src.len:
@@ -80,6 +144,13 @@ proc parseAtom(r: Reader, tok: string): Value =
   if tok == "true": return TrueV
   if tok == "false": return FalseV
   if tok.len > 1 and tok[0] == ':': return mkKeyword(tok[1 .. ^1])
+  # Clojure accepts hexadecimal integer literals, commonly used for bit masks
+  # and crypto constants.
+  let sign = (if tok.len > 0 and tok[0] == '-': -1'i64 else: 1'i64)
+  let digits = (if tok.len > 0 and tok[0] in {'-', '+'}: tok[1 .. ^1] else: tok)
+  if digits.len > 2 and digits[0 .. 1].toLowerAscii == "0x":
+    try: return mkInt(sign * int64(parseHexInt(digits[2 .. ^1])))
+    except ValueError: discard
   # number?
   let body = (if tok[0] in {'-', '+'} and tok.len > 1: tok[1 .. ^1] else: tok)
   if body.len > 0 and body[0] in Digits:
@@ -115,6 +186,8 @@ proc readForm(r: var Reader): Value =
     r.readerErr("Unmatched delimiter: " & c)
   of '"':
     return r.readString
+  of '\\':
+    return r.readChar
   of '\'':
     discard r.advance
     return mkList(@[mkSymbol("quote"), r.readForm])
@@ -130,13 +203,30 @@ proc readForm(r: var Reader): Value =
     if r.peek2 == '{':
       discard r.advance; discard r.advance
       return mkSet(r.readDelimited('}'))
+    if r.peek2 == '"':
+      # A Clojure regex literal carries its pattern source at read time.  The
+      # runtime's regular-expression operations accept that source string, so
+      # preserve the usual string escaping while avoiding a JVM-only Pattern
+      # object in the portable value representation.
+      discard r.advance
+      return r.readString
     if r.peek2 == '_':
       discard r.advance; discard r.advance
       discard r.readForm
       r.skipWs
       return r.readForm
     if r.peek2 == '(':
-      r.readerErr("#() anonymous fn literals are not supported; use (fn [x] ...)")
+      discard r.advance; discard r.advance
+      inc r.anonId
+      let arg = "anon_arg_" & $r.anonId
+      let body = r.readDelimited(')')
+      # The contents are one call, not a body: #(f x) is (fn [a] (f x)).
+      let form = replaceAnonArg(mkList(body), arg)
+      var arity = 0
+      countAnonArgs(mkList(body), arity)
+      var params: seq[Value] = @[]
+      for i in 1 .. arity: params.add mkSymbol(arg & "_" & $i)
+      return mkList(@[mkSymbol("fn"), mkVector(params), form])
     r.readerErr("Unsupported dispatch: #" & r.peek2
       )
   else:

@@ -143,7 +143,7 @@ const specialHeads = ["quote", "if", "do", "let", "let*", "loop", "loop*",
   "recur", "fn", "fn*", "def", "defn", "defn-", "defmacro", "and", "or",
   "when", "when-not", "if-not", "cond", "when-let", "if-let", "->", "->>",
   "doseq", "dotimes", "try", "comment", "ns", "require", "in-ns", "use",
-  "import", "set!", "declare"].toHashSet
+  "import", "set!", "declare", "binding"].toHashSet
 
 const intOps = {"+": "+", "-": "-", "*": "*"}.toTable
 const intCalls = {"quot": "idiv", "rem": "irem"}.toTable
@@ -175,6 +175,7 @@ proc quoteLit(v: Value): string =
   of kBool: (if v.b: "TrueV" else: "FalseV")
   of kInt: "mkInt(" & $v.i & ")"
   of kFloat: "mkFloat(" & $v.f & ")"
+  of kChar: "mkChar(" & $v.i & ")"
   of kStr: "mkStr(" & nimStr(v.s) & ")"
   of kKeyword: "mkKeyword(" & nimStr(v.s) & ")"
   of kSymbol: "mkSymbol(" & nimStr(v.s) & ")"
@@ -254,6 +255,7 @@ type
     params: seq[string]
     restParam: string
     body: seq[Value]
+    destructures: seq[(Value, string)]
 
 proc parseParams(v: Value): FnClause =
   if v.isNil or v.kind != kVector: err("Parameter list must be a vector, got: " & prStr(v))
@@ -263,9 +265,20 @@ proc parseParams(v: Value): FnClause =
     let p = v.items[i]
     if isSym(p, "&"):
       if i + 1 >= v.items.len: err("Missing symbol after &")
-      result.restParam = symName(v.items[i + 1])
+      let rest = v.items[i + 1]
+      if rest.kind == kSymbol: result.restParam = symName(rest)
+      else:
+        result.restParam = "destr__rest"
+        result.destructures.add (rest, result.restParam)
       break
-    result.params.add symName(p)
+    if p.kind == kSymbol:
+      result.params.add symName(p)
+    else:
+      # A destructuring parameter binds a plain one, then lets the existing
+      # let machinery take it apart at the top of the body.
+      let nm = "destr__" & $i
+      result.params.add nm
+      result.destructures.add (p, nm)
     inc i
 
 proc genClauseBody(cl: FnClause, name, selfIdent: string, env: Env, c: Ctx,
@@ -318,6 +331,51 @@ proc collectRecurs(forms: seq[Value], into: var seq[seq[Value]]) =
         continue
       if coreName(head.s) in ["loop", "loop*", "fn", "fn*", "defn", "defn-"]: continue
     collectRecurs(f.items, into)
+
+proc patternNames(v: Value, into: var HashSet[string]) =
+  ## Names a binding pattern introduces. Lenient: the resolver has already
+  ## rejected malformed patterns, and a name too many only costs an
+  ## optimisation.
+  if v.isNil: return
+  case v.kind
+  of kSymbol: (if v.s != "&": into.incl v.s)
+  of kVector:
+    for x in v.items: patternNames(x, into)
+  of kMap:
+    for (k, value) in v.pairs:
+      if k.kind == kKeyword:
+        case k.s
+        of "keys", "syms", "strs":
+          for x in value.items: (if x.kind == kSymbol: into.incl x.s)
+        of "as": patternNames(value, into)
+        else: discard
+      else: patternNames(k, into)
+  else: discard
+
+proc collectBoundSymbols(v: Value, into: var HashSet[string]) =
+  ## Every name a binding form inside these forms introduces. A loop variable
+  ## or parameter that some inner form rebinds cannot be held as a raw int64:
+  ## the int analysis probes recur values in the outer scope, where the name
+  ## still looks integral even though the recur sees the inner Value binding.
+  if v.isNil or v.kind != kList or v.items.len == 0: return
+  let head = v.items[0]
+  if head.kind == kSymbol:
+    let h = coreName(head.s)
+    if h in ["let", "let*", "loop", "loop*", "when-let", "if-let", "doseq",
+             "dotimes", "binding"] and v.items.len > 1 and v.items[1].kind == kVector:
+      var i = 0
+      while i < v.items[1].items.len:
+        patternNames(v.items[1].items[i], into)
+        i += 2
+    elif h in ["fn", "fn*", "defn", "defn-"]:
+      for x in v.items:
+        if x.kind == kVector: patternNames(x, into)
+        elif x.kind == kList and x.items.len > 0 and x.items[0].kind == kVector:
+          patternNames(x.items[0], into)
+  for x in v.items: collectBoundSymbols(x, into)
+
+proc shadowedNames(forms: seq[Value]): HashSet[string] =
+  for f in forms: collectBoundSymbols(f, result)
 
 proc usesIntPrim(c: Ctx, forms: seq[Value]): bool =
   ## Whether an int-specialised twin could differ from the generic proc at all.
@@ -376,6 +434,9 @@ proc genFn(name: string, clauses: seq[FnClause], selfIdent: string, env: Env,
         probe.ints.incl p
       probe.intFns[key] = iprc
       var recurSafe = true
+      let shadowed = shadowedNames(cl.body)
+      for p in cl.params:
+        if p in shadowed: recurSafe = false
       var myRecurs: seq[seq[Value]] = @[]
       collectRecurs(cl.body, myRecurs)
       for r in myRecurs:
@@ -441,6 +502,15 @@ proc genFn(name: string, clauses: seq[FnClause], selfIdent: string, env: Env,
   c.pop
   c.line(")")
 
+proc withDestructuring(cl: FnClause): FnClause =
+  result = cl
+  if cl.destructures.len == 0: return
+  var bs: seq[Value] = @[]
+  for (pattern, nm) in cl.destructures:
+    bs.add pattern
+    bs.add mkSymbol(nm)
+  result.body = @[mkList(@[mkSymbol("let"), mkVector(bs)] & cl.body)]
+
 proc genFnForm(args: seq[Value], env: Env, c: Ctx, dst: string, defName: string,
                directEnv: Env = nil, cell = "") =
   ## (fn name? [params] body...) or (fn name? ([params] body...) ...)
@@ -453,14 +523,14 @@ proc genFnForm(args: seq[Value], env: Env, c: Ctx, dst: string, defName: string,
   if i < args.len and args[i].kind == kVector:
     var cl = parseParams(args[i])
     cl.body = args[i + 1 .. ^1]
-    clauses.add cl
+    clauses.add withDestructuring(cl)
   else:
     while i < args.len:
       let cf = args[i]
       if cf.kind != kList or cf.items.len == 0: err("Bad fn arity form: " & prStr(cf))
       var cl = parseParams(cf.items[0])
       cl.body = cf.items[1 .. ^1]
-      clauses.add cl
+      clauses.add withDestructuring(cl)
       inc i
   if clauses.len == 0: err("fn requires at least one arity")
   if name.len > 0:
@@ -472,6 +542,70 @@ proc genFnForm(args: seq[Value], env: Env, c: Ctx, dst: string, defName: string,
   else:
     genFn("fn", clauses, "", env, c, dst)
 
+proc bindPattern(target: Value, v: string, lenv: Env, c: Ctx) =
+  ## Bind one binding form -- a symbol or a destructuring pattern -- to the
+  ## value already computed into `v`.
+  if target.kind == kSymbol:
+    let id = c.gensym("l" & mangle(target.s))
+    c.line("var " & id & ": Value = " & v)
+    lenv.locals[target.s] = id
+  elif target.kind == kVector:
+    # sequential destructuring: [a b & rest :as whole]
+    var idx = 0
+    var j = 0
+    while j < target.items.len:
+      let p = target.items[j]
+      if p.kind == kKeyword and p.s == "as":
+        if j + 1 >= target.items.len: err("Missing symbol after :as")
+        bindPattern(target.items[j + 1], v, lenv, c)
+        j += 2
+        continue
+      if isSym(p, "&"):
+        if j + 1 >= target.items.len: err("Missing binding form after &")
+        let id = c.gensym("lrest")
+        c.line("var " & id & ": Value = seqDropOrNil(" & v & ", " & $idx & ")")
+        bindPattern(target.items[j + 1], id, lenv, c)
+        j += 2
+        continue
+      let id = c.gensym("lnth")
+      c.line("var " & id & ": Value = call(getVar(\"clojure.core/nth\"), [" & v & ", mkInt(" &
+             $idx & "), NilV])")
+      bindPattern(p, id, lenv, c)
+      inc idx; inc j
+  elif target.kind == kMap:
+    # associative destructuring: {a :a, :keys [b c], :or {b 1}, :as m}
+    var defaults = NilV
+    for (k, valForm) in target.pairs:
+      if k.kind == kKeyword and k.s == "or": defaults = valForm
+    proc bindKey(nm: string, key: string) =
+      let id = c.gensym("l" & mangle(nm))
+      var default = "NilV"
+      if defaults.kind == kMap:
+        for (dk, dv) in defaults.pairs:
+          if dk.kind == kSymbol and dk.s == nm: default = genExpr(dv, lenv, c)
+      c.line("var " & id & ": Value = call(getVar(\"clojure.core/get\"), [" & v &
+             ", mkKeyword(" & nimStr(key) & "), " & default & "])")
+      lenv.locals[nm] = id
+    for (k, valForm) in target.pairs:
+      if k.kind == kKeyword:
+        case k.s
+        of "or": discard
+        of "as": bindPattern(valForm, v, lenv, c)
+        of "keys":
+          for ks in valForm.items: bindKey(symName(ks), symName(ks))
+        of "strs":
+          for ks in valForm.items: bindKey(symName(ks), symName(ks))
+        else: err("Unsupported destructuring directive: :" & k.s)
+      elif valForm.kind == kKeyword and k.kind == kSymbol:
+        bindKey(symName(k), valForm.s)
+      else:
+        let id = c.gensym("l" & mangle(symName(k)))
+        let kv = genExpr(valForm, lenv, c)
+        c.line("var " & id & ": Value = call(getVar(\"clojure.core/get\"), [" & v & ", " & kv & "])")
+        lenv.locals[symName(k)] = id
+  else:
+    err("Unsupported binding form: " & prStr(target))
+
 proc genLet(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
   if bindings.isNil or bindings.kind != kVector:
     err("let requires a vector for its bindings")
@@ -480,57 +614,35 @@ proc genLet(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
   let lenv = newEnv(env)
   var i = 0
   while i < bindings.items.len:
-    let target = bindings.items[i]
-    let initForm = bindings.items[i + 1]
-    let v = genExpr(initForm, lenv, c)
-    if target.kind == kSymbol:
-      let id = c.gensym("l" & mangle(target.s))
-      c.line("var " & id & ": Value = " & v)
-      lenv.locals[target.s] = id
-    elif target.kind == kVector:
-      # sequential destructuring: [a b & rest]
-      var idx = 0
-      var j = 0
-      while j < target.items.len:
-        let p = target.items[j]
-        if isSym(p, "&"):
-          let restSym = symName(target.items[j + 1])
-          let id = c.gensym("l" & mangle(restSym))
-          c.line("var " & id & ": Value = seqDrop(" & v & ", " & $idx & ")")
-          lenv.locals[restSym] = id
-          break
-        let id = c.gensym("l" & mangle(symName(p)))
-        c.line("var " & id & ": Value = call(getVar(\"clojure.core/nth\"), [" & v & ", mkInt(" &
-               $idx & "), NilV])")
-        lenv.locals[symName(p)] = id
-        inc idx; inc j
-    elif target.kind == kMap:
-      # associative destructuring: {a :a, :keys [b c]}
-      for (k, valForm) in target.pairs:
-        if k.kind == kKeyword and k.s == "keys":
-          for ks in valForm.items:
-            let nm = symName(ks)
-            let id = c.gensym("l" & mangle(nm))
-            c.line("var " & id & ": Value = call(getVar(\"clojure.core/get\"), [" & v &
-                   ", mkKeyword(" & nimStr(nm) & ")])")
-            lenv.locals[nm] = id
-        else:
-          let nm = symName(k)
-          let id = c.gensym("l" & mangle(nm))
-          let kv = genExpr(valForm, lenv, c)
-          c.line("var " & id & ": Value = call(getVar(\"clojure.core/get\"), [" & v & ", " & kv & "])")
-          lenv.locals[nm] = id
-    else:
-      err("Unsupported binding form: " & prStr(target))
+    let v = genExpr(bindings.items[i + 1], lenv, c)
+    bindPattern(bindings.items[i], v, lenv, c)
     i += 2
   genBody(body, dst, lenv, c)
 
 proc genLoop(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
   if bindings.isNil or bindings.kind != kVector or bindings.items.len mod 2 != 0:
     err("loop requires an even-sized binding vector")
+  # A destructuring loop variable becomes a plain one that recur can assign,
+  # taken apart again by a let at the top of the body.
+  var bindings = bindings
+  var body = body
+  var patterns: seq[Value] = @[]
+  var i = 0
+  while i < bindings.items.len:
+    if bindings.items[i].kind != kSymbol:
+      let nm = mkSymbol("loop__" & $i)
+      patterns.add bindings.items[i]
+      patterns.add nm
+      var xs = bindings.items
+      xs[i] = nm
+      bindings = mkVector(xs)
+    i += 2
+  if patterns.len > 0:
+    body = @[mkList(@[mkSymbol("let"), mkVector(patterns)] & body)]
+
   var names: seq[string] = @[]
   var inits: seq[Value] = @[]
-  var i = 0
+  i = 0
   while i < bindings.items.len:
     names.add symName(bindings.items[i])
     inits.add bindings.items[i + 1]
@@ -544,8 +656,9 @@ proc genLoop(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
   collectRecurs(body, recurs)
   for r in recurs:
     if r.len != names.len: recurs = @[]; break   # arity error, reported later
+  let shadowed = shadowedNames(body)
   var isInt: seq[bool] = @[]
-  for n in names: isInt.add true
+  for n in names: isInt.add n notin shadowed
   var probeIdents: seq[string] = @[]
   for n in names: probeIdents.add "probe"
   while true:
@@ -778,7 +891,7 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
   ## Keeping a subexpression as an expression is what lets the C compiler hold
   ## it in a register instead of round-tripping it through a Value slot.
   case f.kind
-  of kNil, kBool, kInt, kFloat, kStr, kKeyword:
+  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword:
     quoteLit(f)
   of kSymbol:
     let local = env.lookup(f.s)
@@ -846,7 +959,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
   if e.len > 0:
     c.line(dst & " = " & e); return
   case f.kind
-  of kNil, kBool, kInt, kFloat, kStr, kKeyword:
+  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword:
     c.line(dst & " = " & quoteLit(f))
   of kSymbol:
     let local = env.lookup(f.s)
@@ -1090,6 +1203,31 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
         c.pop
         c.line(dst & " = NilV")
         return
+      of "binding":
+        # Dynamic scope: the vars keep their new values for the duration of
+        # the body, on every path out of it.
+        let b = args[0]
+        if b.kind != kVector or b.items.len mod 2 != 0:
+          err("binding requires paired bindings")
+        var saved: seq[(string, string)] = @[]
+        var i = 0
+        while i < b.items.len:
+          let nm = symName(b.items[i])
+          let v = genExpr(b.items[i + 1], env, c)
+          let cell = c.cellFor(nm)
+          let keep = c.gensym("bind")
+          c.line("var " & keep & ": Value = cellGet(" & cell & ")")
+          c.line("setVar(" & nimStr(nm) & ", " & v & ")")
+          saved.add (nm, keep)
+          i += 2
+        c.line("try:")
+        c.push; genBody(args[1 .. ^1], dst, env, c); c.pop
+        c.line("finally:")
+        c.push
+        for (nm, keep) in saved:
+          c.line("setVar(" & nimStr(nm) & ", " & keep & ")")
+        c.pop
+        return
       of "try":
         var bodyForms: seq[Value] = @[]
         var catchSym = ""
@@ -1134,6 +1272,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
 # ------------------------------------------------------------- entry point
 const preamble = """
 ## Generated by clonim. Do not edit.
+import std/os
 import app_runtime
 
 proc cljMain() =
@@ -1165,6 +1304,20 @@ proc compileForms*(forms: seq[Value]): string =
     c.line("var " & t & ": Value = NilV")
     genInto(f, t, env, c)
     c.line("discard " & t)
+  # A program that defines -main gets it called with the command-line
+  # arguments once the top-level forms have run, as on the JVM.
+  var mainVar = ""
+  for name, _ in c.defCounts:
+    if name == "-main" or name.endsWith("/-main"): mainVar = name
+  c.line("var clonimArgv: seq[Value] = @[]")
+  c.line("for a in commandLineParams(): clonimArgv.add mkStr(a)")
+  c.line("setVar(\"clojure.core/*command-line-args*\", " &
+         "(if clonimArgv.len == 0: NilV else: mkList(clonimArgv)))")
+  if mainVar.len > 0:
+    c.line("if hasVar(" & nimStr(mainVar) & "):")
+    c.push
+    c.line("discard call(getVar(" & nimStr(mainVar) & "), clonimArgv)")
+    c.pop
   var src = preamble & "  initClonimRuntime()\n  registerCore()\n  registerNamespaceCore()\n" & c.prelude.join("\n") & "\n" &
             c.body.join("\n") & "\n\n"
   src &= """
