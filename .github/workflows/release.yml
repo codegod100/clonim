@@ -108,3 +108,4 @@ jobs:
               --verify-tag \
               --generate-notes \
               --title "$TAG"
+          fi
