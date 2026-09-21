@@ -3,3 +3,4 @@ nimcache/
 .clj-kondo/.cache/
 .lsp/
 bench/bin/
+__pycache__/

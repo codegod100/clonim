@@ -14,7 +14,14 @@ Compute is reported as total minus the `hello` time for the same toolchain,
 which is how a 0.5 ms native start is kept from flattering clonim against a
 runtime that pays ~105 ms to boot before it reaches main.
 """
-import collections, subprocess, sys, time
+
+import collections
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 BENCHES = ["fib", "loop", "seqs"]
 ROUNDS = 11
@@ -22,7 +29,7 @@ ROUNDS = 11
 
 def timed(cmd):
     start = time.perf_counter()
-    subprocess.run(cmd, capture_output=True)
+    subprocess.run(cmd, capture_output=True, check=True)
     return (time.perf_counter() - start) * 1000
 
 
@@ -33,13 +40,32 @@ def main(argv):
         suites["jolt"] = {b: [f"bench/bin/jolt-{b}"] for b in ["hello"] + BENCHES}
 
     best = collections.defaultdict(lambda: float("inf"))
+    samples = {label: {b: [] for b in cmds} for label, cmds in suites.items()}
     for label, cmds in suites.items():          # warm the page cache first
         for cmd in cmds.values():
-            subprocess.run(cmd, capture_output=True)
+            subprocess.run(cmd, capture_output=True, check=True)
     for _ in range(ROUNDS):
         for label, cmds in suites.items():
             for bench, cmd in cmds.items():
-                best[label, bench] = min(best[label, bench], timed(cmd))
+                elapsed = timed(cmd)
+                samples[label][bench].append(elapsed)
+                best[label, bench] = min(best[label, bench], elapsed)
+
+    if output := os.environ.get("BENCH_JSON"):
+        result = {
+            "schema_version": 1,
+            "rounds": ROUNDS,
+            "samples_ms": samples,
+            "best_ms": {
+                label: {b: best[label, b] for b in cmds}
+                for label, cmds in suites.items()
+            },
+            "compute_ms": {
+                label: {b: best[label, b] - best[label, "hello"] for b in BENCHES}
+                for label in suites
+            },
+        }
+        Path(output).write_text(json.dumps(result, indent=2) + "\n")
 
     width = max(len(l) for l in suites)
     print(f"{'':<{width}} {'startup':>9} " + " ".join(f"{b:>8}" for b in BENCHES))

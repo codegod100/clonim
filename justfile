@@ -57,6 +57,10 @@ clean:
 # is installed. Both toolchains get a `hello` binary so startup can be
 # subtracted; see bench/measure.py for why the numbers are best-of-N
 # round-robin rather than averaged.
+# Record a Jolt comparison, flag regressions, and commit only its history record.
+bench-store threshold="10":
+    python3 bench/store.py {{quote(threshold)}}
+
 # Time bench/*.clj as native binaries, optionally against jolt.
 measure mode="solo": release
     #!/usr/bin/env bash
@@ -70,6 +74,10 @@ measure mode="solo": release
         exec python3 bench/measure.py
     fi
     if ! command -v jolt >/dev/null; then
+        if [ -n "${BENCH_JSON:-}" ]; then
+            echo "jolt is required when storing benchmark results" >&2
+            exit 1
+        fi
         echo "jolt is not installed; running clonim only" >&2
         exec python3 bench/measure.py
     fi

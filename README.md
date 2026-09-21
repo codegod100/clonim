@@ -18,6 +18,11 @@ nim c --hints:off -o:bin/clonim src/clonim.nim   # build the compiler
 There is a `justfile` too: `just build`, `just test`, `just bench`,
 `just run <file>`, `just emit <file>`, `just accept` (re-record expectations).
 
+`just bench-store` benchmarks against jolt-lang, commits a timestamped result,
+and flags slowdowns above 10% versus the latest compatible run. Requires Jolt
+and a clean working tree. Use `just bench-store 15` to change the threshold;
+see [benchmark history](bench/README.md) for metrics and exit codes.
+
 ## Pipeline
 
 | stage | file | what it does |
