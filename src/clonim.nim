@@ -6,6 +6,29 @@
 import std/[hashes, os, osproc, sequtils, strutils, times]
 import runtime, compiler
 
+when defined(releaseCompiler):
+  const
+    EmbeddedAppRuntime = staticRead("app_runtime.nim")
+    EmbeddedRuntimeTypes = staticRead("runtime_types.nim")
+    EmbeddedCoreStdlib = staticRead("../stdlib/clonim/core.clj")
+
+  proc embeddedRoot(): string =
+    ## Materialize the compiler-only inputs under a content-keyed cache. The
+    ## runtime implementation remains the separately shipped static archive.
+    var h: Hash = hash(EmbeddedAppRuntime)
+    h = h !& hash(EmbeddedRuntimeTypes)
+    h = h !& hash(EmbeddedCoreStdlib)
+    result = getTempDir() / "clonim-runtime" / $(!$h)
+    let files = [
+      (result / "src" / "app_runtime.nim", EmbeddedAppRuntime),
+      (result / "src" / "runtime_types.nim", EmbeddedRuntimeTypes),
+      (result / "stdlib" / "clonim" / "core.clj", EmbeddedCoreStdlib),
+    ]
+    for (path, contents) in files:
+      createDir(path.parentDir)
+      if not fileExists(path) or getFileSize(path) != contents.len:
+        writeFile(path, contents)
+
 proc usage() =
   echo """clonim — a Clojure compiler hosted on Nim
 
@@ -23,6 +46,8 @@ options:
 
 proc srcDir(): string =
   ## Where generated programs find the private runtime interface.
+  when defined(releaseCompiler):
+    return embeddedRoot() / "src"
   for cand in [getAppDir(), getAppDir().parentDir / "src",
                getAppDir().parentDir.parentDir / "src"]:
     if fileExists(cand / "app_runtime.nim"): return cand
@@ -31,6 +56,11 @@ proc srcDir(): string =
 proc runtimeLib(release: bool): string =
   ## Release archives place the private runtime beside bin/. A source checkout
   ## builds the same archive into lib/ on first use.
+  when defined(releaseCompiler):
+    let shipped = getAppDir() / "libclonim_runtime.a"
+    if fileExists(shipped): return shipped
+    raise newException(IOError,
+      "missing runtime library beside compiler: " & shipped)
   let libName = (if release: "libclonim_runtime.a" else: "libclonim_runtime_debug.a")
   let installed = getAppDir().parentDir / "lib" / libName
   let source = srcDir() / "runtime_lib.nim"
@@ -83,6 +113,10 @@ proc main() =
   var outBin = ""
   var verbose = false
   var release = cmd == "build"
+  when defined(releaseCompiler):
+    # The distributed compiler ships one release-mode runtime archive. Nim's
+    # debug and release modes are not ABI-compatible, so `run` uses it too.
+    release = true
   var sourceRoots: seq[string] = @[]
   var i = 2
   while i < argv.len:

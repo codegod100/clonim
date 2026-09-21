@@ -69,35 +69,24 @@ jobs:
           nim c -d:release --app:staticlib --nimMainPrefix:ClonimRuntime \
             --hints:off --warnings:off --nimcache:lib/nimcache-release \
             -o:lib/libclonim_runtime.a src/runtime_lib.nim
-          nim c -d:release --hints:off --warnings:off \
+          nim c -d:release -d:releaseCompiler --hints:off --warnings:off \
             -o:bin/clonim src/clonim.nim
 
       - name: Package release
-        env:
-          ARCHIVE_ROOT: clonim-linux-x86_64
         run: |
-          install -Dm755 bin/clonim "dist/$ARCHIVE_ROOT/bin/clonim"
-          install -Dm644 lib/libclonim_runtime.a \
-            "dist/$ARCHIVE_ROOT/lib/libclonim_runtime.a"
-          install -Dm644 lib/libclonim_runtime_debug.a \
-            "dist/$ARCHIVE_ROOT/lib/libclonim_runtime_debug.a"
-          install -Dm644 src/app_runtime.nim \
-            "dist/$ARCHIVE_ROOT/src/app_runtime.nim"
-          install -Dm644 src/runtime_types.nim \
-            "dist/$ARCHIVE_ROOT/src/runtime_types.nim"
-          cp -R stdlib "dist/$ARCHIVE_ROOT/stdlib"
-          cp README.md "dist/$ARCHIVE_ROOT/README.md"
-          tar -C dist -czf "dist/$ARCHIVE_ROOT.tar.gz" "$ARCHIVE_ROOT"
+          install -Dm755 bin/clonim dist/clonim-linux-x86_64
+          install -Dm644 lib/libclonim_runtime.a dist/libclonim_runtime.a
           cd dist
-          sha256sum "$ARCHIVE_ROOT.tar.gz" > "$ARCHIVE_ROOT.tar.gz.sha256"
+          sha256sum clonim-linux-x86_64 libclonim_runtime.a > SHA256SUMS
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: clonim-${{ steps.release.outputs.tag }}-linux-x86_64
           path: |
-            dist/clonim-linux-x86_64.tar.gz
-            dist/clonim-linux-x86_64.tar.gz.sha256
+            dist/clonim-linux-x86_64
+            dist/libclonim_runtime.a
+            dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 90
 
@@ -109,11 +98,13 @@ jobs:
           body: |
             Linux x86_64 release of clonim.
 
-            The archive contains the compiler, its matched private static
-            runtime archives, runtime interface, and clonim standard library.
+            Download `clonim-linux-x86_64` and `libclonim_runtime.a` into the
+            same directory. Generated programs statically link the runtime and
+            are standalone. Nim must be installed as the native-code backend.
           draft: false
           prerelease: false
           files: |
-            dist/clonim-linux-x86_64.tar.gz
-            dist/clonim-linux-x86_64.tar.gz.sha256
+            dist/clonim-linux-x86_64
+            dist/libclonim_runtime.a
+            dist/SHA256SUMS
           fail_on_unmatched_files: true

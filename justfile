@@ -14,7 +14,7 @@ runtime-libs:
 
 # Build with optimisations on (compiler and, via -d:release, the programs it emits)
 release: runtime-libs
-    nim c -d:release --hints:off --warnings:off -o:{{bin}} src/clonim.nim
+    nim c -d:release -d:releaseCompiler --hints:off --warnings:off -o:{{bin}} src/clonim.nim
 
 # Run every example against tests/<name>.expected
 test: build
