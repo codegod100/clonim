@@ -29,3 +29,6 @@
 (let [v (volatile! 1)] (vreset! v 9) (println @v (vswap! v + 1)))     ; 9 10
 (println (boolean nil) (instance? (class (int-array 0)) (int-array 2)))
 (println (try (throw (ex-info "boom" {})) (catch Exception e (ex-message e))))
+
+;; a string is a sequence of characters
+(println (map int "IHDR") (first "xy") (apply str (reverse "abc")))

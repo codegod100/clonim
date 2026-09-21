@@ -689,7 +689,7 @@ proc toSeq*(v: Value): seq[Value] =
   of kList, kVector, kSet, kCons, kChunk, kLazy: v.items
   of kStr:
     var r: seq[Value] = @[]
-    for c in v.s: r.add mkStr($c)
+    for c in v.s: r.add mkChar(int64(ord(c)))
     r
   of kMap:
     var r: seq[Value] = @[]
