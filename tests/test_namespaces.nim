@@ -28,6 +28,12 @@ suite "static namespace resolution":
     check forms[0].kind == kStr
     check forms[0].s == "(?i)^did:[a-z0-9]+:"
 
+  test "regex functions operate on literal pattern source":
+    registerCore()
+    let found = call(cellGet(varCell("re-find")),
+      [mkStr("(?i)^did:[a-z0-9]+:"), mkStr("DID:plc:abc")])
+    check equals(found, mkStr("DID:plc:"))
+
   test "host namespaces resolve without placeholder source files":
     checkForms("(ns user (:require [clojure.string :as str])) (str/trim \" hi \")",
       "(clojure.string/trim \" hi \")")

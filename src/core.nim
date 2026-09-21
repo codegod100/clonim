@@ -1,5 +1,5 @@
 ## clonim core — clojure.core builtins, registered into the global var table.
-import std/[strutils, math, times, random]
+import std/[strutils, math, times, random, re]
 import runtime
 
 proc num(v: Value): float64 =
@@ -520,6 +520,15 @@ proc registerCore*() =
   def "clojure.string/upper-case", proc (a: openArray[Value]): Value = mkStr(a[0].s.toUpperAscii)
   def "clojure.string/lower-case", proc (a: openArray[Value]): Value = mkStr(a[0].s.toLowerAscii)
   def "clojure.string/trim", proc (a: openArray[Value]): Value = mkStr(a[0].s.strip)
+  def "re-find", proc (a: openArray[Value]): Value =
+    let pattern = re(a[0].s)
+    let start = find(a[1].s, pattern)
+    if start < 0: NilV
+    else:
+      let n = matchLen(a[1].s, pattern, start)
+      mkStr(a[1].s[start ..< start + n])
+  def "clojure.string/replace", proc (a: openArray[Value]): Value =
+    mkStr(a[0].s.replace(re(a[1].s), a[2].s))
   def "clojure.string/split", proc (a: openArray[Value]): Value =
     var r: seq[Value] = @[]
     for piece in a[0].s.split(a[1].s): r.add mkStr(piece)
