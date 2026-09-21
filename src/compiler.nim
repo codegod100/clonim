@@ -584,6 +584,59 @@ proc genLoop(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
   c.line("break")
   c.pop
 
+proc fusableStage(c: Ctx, env: Env, f: Value): bool =
+  ## A map/filter/remove call whose result is this expression and nothing else.
+  if f.kind != kList or f.items.len != 3: return false
+  let h = f.items[0]
+  if h.kind != kSymbol: return false
+  if h.s notin ["map", "filter", "remove"]: return false
+  env.lookup(h.s).len == 0 and c.primStable(h.s)
+
+proc fusableCall(c: Ctx, env: Env, head: string, args: seq[Value]): bool =
+  ## Whether this is a pipeline tryFuse will take.
+  if env.lookup(head).len > 0 or not c.primStable(head): return false
+  var collIdx = -1
+  if head == "reduce" and args.len in {2, 3}: collIdx = args.len - 1
+  elif head == "count" and args.len == 1: collIdx = 0
+  else: return false
+  c.fusableStage(env, args[collIdx])
+
+proc tryFuse(c: Ctx, env: Env, head: string, args: seq[Value],
+             dst: string): bool =
+  ## `(reduce f (map g (filter p src)))` and `(count (map g src))` build their
+  ## intermediate sequences only to walk them once. Those intermediates are
+  ## temporaries -- no name refers to them, so nothing can observe their
+  ## memoisation -- which makes it safe to run the whole chain as one loop.
+  ## A named pipeline is left alone: `(def ys (map f xs))` must still cache.
+  if not c.fusableCall(env, head, args): return false
+  let collIdx = (if head == "count": 0 else: args.len - 1)
+
+  # Operands are emitted in source order: the reducing fn, then each stage's
+  # fn from outermost in, then the base. That is the order Clojure evaluates
+  # them in, and the order the unfused calls would have used.
+  var fixed: seq[string] = @[]
+  for i in 0 ..< collIdx: fixed.add genExprTemp(args[i], env, c)
+  var ops: seq[string] = @[]
+  var cur = args[collIdx]
+  while c.fusableStage(env, cur):
+    let stage = symName(cur.items[0])
+    let fnIdent = genExprTemp(cur.items[1], env, c)
+    ops.add(if stage == "map": "FusedOp(isMap: true, fn: " & fnIdent & ")"
+            else: "FusedOp(isMap: false, fn: " & fnIdent & ", keep: " &
+                  (if stage == "filter": "true" else: "false") & ")")
+    cur = cur.items[2]
+  let baseIdent = genExprTemp(cur, env, c)
+  let opsLit = "[" & ops.join(", ") & "]"
+  if head == "count":
+    c.line(dst & " = fusedCount(" & baseIdent & ", " & opsLit & ")")
+  elif fixed.len == 1:
+    c.line(dst & " = fusedReduce(" & fixed[0] & ", NilV, false, " &
+           baseIdent & ", " & opsLit & ")")
+  else:
+    c.line(dst & " = fusedReduce(" & fixed[0] & ", " & fixed[1] & ", true, " &
+           baseIdent & ", " & opsLit & ")")
+  true
+
 proc genCall(f: Value, args: seq[Value], dst: string, env: Env, c: Ctx) =
   # A call to a fn whose arity is known here becomes a direct Nim call: no
   # argument seq, no closure dispatch. When the target came from `def` the
@@ -746,6 +799,9 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
     let head = f.items[0]
     let args = f.items[1 .. ^1]
     if head.kind == kSymbol and specialHeads.contains(head.s): return ""
+    # A fusable pipeline is compiled as statements, so its operands are
+    # evaluated in source order rather than in Nim argument order.
+    if head.kind == kSymbol and c.fusableCall(env, head.s, args): return ""
     var ids: seq[string] = @[]
     if not tryExprs(args, env, c, ids): return ""
     if head.kind == kSymbol:
@@ -818,6 +874,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
       c.line(dst & " = mkList(newSeq[Value]())"); return
     let head = f.items[0]
     let args = f.items[1 .. ^1]
+    if head.kind == kSymbol and c.tryFuse(env, head.s, args, dst): return
     if head.kind == kSymbol:
       case head.s
       of "quote":

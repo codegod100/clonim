@@ -56,6 +56,23 @@ type
     cnt*: int
     nextOrd*: int
 
+  RecipeKind* = enum rkRange, rkMap, rkFilter
+
+  Recipe* = ref object
+    ## What a lazy seq would produce, described rather than built. A consumer
+    ## that is going to realize everything anyway (reduce, count) can read this
+    ## and run the whole pipeline as a single loop, allocating no intermediate
+    ## chunks at all. Consumers that stop early ignore it and take the ordinary
+    ## lazy path, so laziness is unaffected.
+    case rk*: RecipeKind
+    of rkRange:
+      lo*, hi*, step*: int64
+      bounded*: bool
+    of rkMap, rkFilter:
+      rfn*: Value
+      keep*: bool          ## rkFilter: keep matches, or drop them
+      src*: Value
+
   Obj* = ref ValueObj
   ## Value itself is not a ref: nil, bool, int and float live entirely in the
   ## word below, so arithmetic and a numeric sequence never touch the heap. Only
@@ -82,6 +99,7 @@ type
       thunk*: proc (): Value {.closure.}
       cached*: Value
       forced*: bool
+      rec*: Recipe       ## nil unless this seq is a describable pipeline stage
     of kFn:
       fn*: proc (args: openArray[Value]): Value {.closure.}
       name*: string
@@ -464,8 +482,16 @@ proc mkChunk*(xs: sink seq[Value], off: int, rest: Value): Value =
   if off >= xs.len: return (if rest.isNil: NilV else: rest)
   Value(kind: kChunk, obj: Obj(kind: kChunk, chunk: xs, coff: off, ctl: rest))
 
+proc rec*(v: Value): Recipe {.inline.} =
+  (if v.kind == kLazy: v.obj.rec else: nil)
+
 proc mkLazy*(f: proc (): Value {.closure.}): Value =
   Value(kind: kLazy, obj: Obj(kind: kLazy, thunk: f, cached: NilV, forced: false))
+
+proc mkLazyRec*(f: proc (): Value {.closure.}, r: Recipe): Value =
+  ## Same lazy seq, plus the description a fused consumer can use.
+  Value(kind: kLazy, obj: Obj(kind: kLazy, thunk: f, cached: NilV,
+                              forced: false, rec: r))
 
 proc force*(v: Value): Value =
   ## Realize one step: follow a chain of lazy seqs down to a cons, a concrete

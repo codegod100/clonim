@@ -197,6 +197,8 @@ proc lazyOf(c: Cursor): Value =
     let x = next(cc)
     mkCons(x, lazyOf(cc)))
 
+proc lazyFilter(pred: Value, c: Cursor, keep: bool): Value
+
 proc lazyMap(f: Value, c: Cursor): Value =
   ## Chunked, which means f runs for up to ChunkSize elements as soon as the
   ## first is demanded -- the same trade Clojure makes. f must not be relied on
@@ -288,7 +290,7 @@ proc lazyRange(i, hi, step: int64, bounded: bool): Value =
   ## Chunked: one thunk and one chunk per ChunkSize elements rather than a
   ## cons and a thunk each. An unbounded range stays lazy -- it just realizes
   ## a bounded batch at a time.
-  mkLazy(proc (): Value =
+  mkLazyRec(proc (): Value =
     var cur = i
     var xs = newSeqOfCap[Value](ChunkSize)
     while xs.len < ChunkSize:
@@ -296,7 +298,8 @@ proc lazyRange(i, hi, step: int64, bounded: bool): Value =
       xs.add mkInt(cur)
       cur += step
     if xs.len == 0: return NilV
-    mkChunk(xs, 0, lazyRange(cur, hi, step, bounded)))
+    mkChunk(xs, 0, lazyRange(cur, hi, step, bounded)),
+    Recipe(rk: rkRange, lo: i, hi: hi, step: step, bounded: bounded))
 
 proc lazyIterate(f, x: Value): Value =
   mkLazy(proc (): Value = mkCons(x, lazyIterate(f, call(f, [x]))))
@@ -334,6 +337,70 @@ proc lazyConcat(colls: seq[Value], i: int, c: Cursor): Value =
 
 proc def(name: string, f: proc (args: openArray[Value]): Value {.closure.}) =
   setVar(name, mkFn(name, f))
+
+# ----------------------------------------------------------------- fusion
+## A pipeline whose intermediate sequences are syntactic temporaries -- nobody
+## named them, so nobody can hold them -- does not need those sequences to
+## exist. The compiler proves that and calls in here with the stages passed
+## explicitly; the runtime never guesses, because a lazy seq someone named
+## memoizes its elements and a consumer cannot tell whether it is shared.
+##
+## Each base element is pushed through the stages and whatever survives is
+## folded, so no chunk, cursor or intermediate seq is built between stages.
+
+type FusedOp* = object
+  isMap*: bool     ## map when true, filter when false
+  fn*: Value
+  keep*: bool      ## filter: keep matches, or drop them
+
+template pushThrough(ops: openArray[FusedOp], x0: Value, emit: untyped) =
+  ## Stages arrive outermost-first, so they apply in reverse.
+  var it {.inject.} = x0
+  var dropped = false
+  for k in countdown(ops.len - 1, 0):
+    if ops[k].isMap:
+      it = call(ops[k].fn, [it])
+    elif truthy(call(ops[k].fn, [it])) != ops[k].keep:
+      dropped = true
+      break
+  if not dropped:
+    emit
+
+template overBase(base: Value, ops: openArray[FusedOp], emit: untyped) =
+  ## A range base generates its integers in the loop rather than being walked,
+  ## which is safe because range is pure: recomputing an element cannot be
+  ## observed. Any other base is walked normally, so a named lazy source still
+  ## realizes and memoizes exactly as it would have.
+  let br = rec(base)
+  if not br.isNil and br.rk == rkRange:
+    var cur = br.lo
+    while not (br.bounded and ((br.step > 0 and cur >= br.hi) or
+                               (br.step < 0 and cur <= br.hi))):
+      pushThrough(ops, mkInt(cur), emit)
+      cur += br.step
+  else:
+    for x in elems(base):
+      pushThrough(ops, x, emit)
+
+proc fusedReduce*(f, init: Value, hasInit: bool, base: Value,
+                  ops: openArray[FusedOp]): Value =
+  var acc = init
+  var seeded = hasInit
+  overBase(base, ops):
+    if seeded: acc = call(f, [acc, it])
+    else:
+      acc = it
+      seeded = true
+  if seeded: acc
+  elif hasInit: init
+  else: call(f, emptyArgs)
+
+proc fusedCount*(base: Value, ops: openArray[FusedOp]): Value =
+  var n = 0
+  overBase(base, ops):
+    discard it
+    inc n
+  mkInt(n)
 
 proc registerCore*() =
   # ---- arithmetic
@@ -491,7 +558,7 @@ proc registerCore*() =
     # does not realize a lazy seq — just asks whether it has a first element
     (if seqIsEmpty(a[0]): NilV else: a[0])
   def "count", proc (a: openArray[Value]): Value =
-    if a[0].isNil or a[0].kind == kNil: return mkInt(0)
+    if a[0].kind == kNil: return mkInt(0)
     mkInt(count(a[0]))
   def "conj", proc (a: openArray[Value]): Value =
     result = a[0]
@@ -660,7 +727,8 @@ proc registerCore*() =
     lazyFilter(a[0], cursor(a[1]), keep = false)
   def "reduce", proc (a: openArray[Value]): Value =
     ## Streams the source rather than materializing it, so folding a lazy seq
-    ## holds one chunk at a time instead of the whole sequence.
+    ## holds one chunk at a time instead of the whole sequence -- and when the
+    ## source is a describable pipeline, runs the whole thing as one loop.
     let f = a[0]
     if a.len == 2:
       var acc = NilV
