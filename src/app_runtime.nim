@@ -18,10 +18,12 @@ proc setVar*(name: string, v: Value): Value {.discardable, importc: "clonim_set_
 proc cellGet*(c: VarCell): Value {.importc: "clonim_cell_get".}
 proc cellIs*(c: VarCell, v: Value): bool {.importc: "clonim_cell_is".}
 proc getVar*(name: string): Value {.importc: "clonim_get_var".}
+proc hasVar*(name: string): bool {.importc: "clonim_has_var".}
 proc call*(f: Value, args: openArray[Value]): Value {.importc: "clonim_call".}
 proc argAt*(args: openArray[Value], i: int): Value {.importc: "clonim_arg_at".}
 proc restArgs*(args: openArray[Value], i: int): Value {.importc: "clonim_rest_args".}
 proc seqDrop*(v: Value, n: int): Value {.importc: "clonim_seq_drop".}
+proc seqDropOrNil*(v: Value, n: int): Value {.importc: "clonim_seq_drop_or_nil".}
 proc toSeq*(v: Value): seq[Value] {.importc: "clonim_to_seq".}
 proc truthy*(v: Value): bool {.importc: "clonim_truthy".}
 

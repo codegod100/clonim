@@ -37,8 +37,18 @@ proc skipWs(r: var Reader) =
 
 proc readForm(r: var Reader): Value
 
+proc anonArgIndex(name: string): int =
+  ## % and %1 are the first argument, %2 the second, and so on. -1 for
+  ## anything that is not an anonymous-argument symbol.
+  if name.len == 0 or name[0] != '%': return -1
+  if name.len == 1: return 1
+  try: parseInt(name[1 .. ^1])
+  except ValueError: -1
+
 proc replaceAnonArg(v: Value, arg: string): Value =
-  if v.kind == kSymbol and v.s == "%": return mkSymbol(arg)
+  if v.kind == kSymbol:
+    let n = anonArgIndex(v.s)
+    if n > 0: return mkSymbol(arg & "_" & $n)
   case v.kind
   of kList: mkList(v.items.mapIt(replaceAnonArg(it, arg)))
   of kVector: mkVector(v.items.mapIt(replaceAnonArg(it, arg)))
@@ -48,6 +58,20 @@ proc replaceAnonArg(v: Value, arg: string): Value =
     for (k, val) in v.pairs: pairs.add (replaceAnonArg(k, arg), replaceAnonArg(val, arg))
     mkMap(pairs)
   else: v
+
+proc countAnonArgs(v: Value, arity: var int) =
+  if v.isNil: return
+  if v.kind == kSymbol:
+    let n = anonArgIndex(v.s)
+    if n > arity: arity = n
+    return
+  case v.kind
+  of kList, kVector, kSet:
+    for x in v.items: countAnonArgs(x, arity)
+  of kMap:
+    for (k, val) in v.pairs:
+      countAnonArgs(k, arity); countAnonArgs(val, arity)
+  else: discard
 
 proc readDelimited(r: var Reader, closing: char): seq[Value] =
   result = @[]
@@ -196,8 +220,13 @@ proc readForm(r: var Reader): Value =
       inc r.anonId
       let arg = "anon_arg_" & $r.anonId
       let body = r.readDelimited(')')
-      return mkList(@[mkSymbol("fn"), mkVector(@[mkSymbol(arg)])] &
-                    body.mapIt(replaceAnonArg(it, arg)))
+      # The contents are one call, not a body: #(f x) is (fn [a] (f x)).
+      let form = replaceAnonArg(mkList(body), arg)
+      var arity = 0
+      countAnonArgs(mkList(body), arity)
+      var params: seq[Value] = @[]
+      for i in 1 .. arity: params.add mkSymbol(arg & "_" & $i)
+      return mkList(@[mkSymbol("fn"), mkVector(params), form])
     r.readerErr("Unsupported dispatch: #" & r.peek2
       )
   else:

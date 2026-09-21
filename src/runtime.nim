@@ -440,6 +440,12 @@ proc seqDrop*(v: Value, n: int): Value =
     result = seqRest(result)
     dec k
 
+proc seqDropOrNil*(v: Value, n: int): Value =
+  ## What `& rest` binds: the remainder, or nil once it is exhausted, as on
+  ## the JVM, where an empty rest is nil rather than an empty seq.
+  result = seqDrop(v, n)
+  if seqIsEmpty(result): result = NilV
+
 proc hashValue*(v: Value): uint32 =
   if v.isNil: return 0
   case v.kind
