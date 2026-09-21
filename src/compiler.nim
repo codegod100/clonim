@@ -175,6 +175,7 @@ proc quoteLit(v: Value): string =
   of kBool: (if v.b: "TrueV" else: "FalseV")
   of kInt: "mkInt(" & $v.i & ")"
   of kFloat: "mkFloat(" & $v.f & ")"
+  of kChar: "mkChar(" & $v.i & ")"
   of kStr: "mkStr(" & nimStr(v.s) & ")"
   of kKeyword: "mkKeyword(" & nimStr(v.s) & ")"
   of kSymbol: "mkSymbol(" & nimStr(v.s) & ")"
@@ -778,7 +779,7 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
   ## Keeping a subexpression as an expression is what lets the C compiler hold
   ## it in a register instead of round-tripping it through a Value slot.
   case f.kind
-  of kNil, kBool, kInt, kFloat, kStr, kKeyword:
+  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword:
     quoteLit(f)
   of kSymbol:
     let local = env.lookup(f.s)
@@ -846,7 +847,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
   if e.len > 0:
     c.line(dst & " = " & e); return
   case f.kind
-  of kNil, kBool, kInt, kFloat, kStr, kKeyword:
+  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword:
     c.line(dst & " = " & quoteLit(f))
   of kSymbol:
     let local = env.lookup(f.s)

@@ -30,6 +30,7 @@ iterator elems*(v: Value): Value =
 
 proc mkInt*(x: int64): Value {.importc: "clonim_mk_int".}
 proc mkFloat*(x: float64): Value {.importc: "clonim_mk_float".}
+proc mkChar*(code: int64): Value {.importc: "clonim_mk_char".}
 proc mkStr*(x: string): Value {.importc: "clonim_mk_str".}
 proc mkKeyword*(x: string): Value {.importc: "clonim_mk_keyword".}
 proc mkSymbol*(x: string): Value {.importc: "clonim_mk_symbol".}

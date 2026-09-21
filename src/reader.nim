@@ -80,6 +80,33 @@ proc readString(r: var Reader): Value =
       s.add c
   mkStr(s)
 
+proc readChar(r: var Reader): Value =
+  ## A character literal: \a, \newline, \uXXXX, or any single character —
+  ## including the delimiters, which never start a name here.
+  discard r.advance # the backslash
+  if r.pos >= r.src.len: r.readerErr("EOF while reading character")
+  let first = r.advance
+  var name = $first
+  if first in Letters or first in Digits:
+    while r.pos < r.src.len:
+      let c = r.peek
+      if c in {' ', '\t', '\n', '\r', ','} or (c in macroChars and c != '\''): break
+      name.add r.advance
+  if name.len == 1: return mkChar(int64(ord(name[0])))
+  case name
+  of "newline": mkChar(10)
+  of "tab": mkChar(9)
+  of "return": mkChar(13)
+  of "space": mkChar(32)
+  of "backspace": mkChar(8)
+  of "formfeed": mkChar(12)
+  else:
+    if name[0] == 'u' and name.len == 5:
+      try: return mkChar(int64(parseHexInt(name[1 .. ^1])))
+      except ValueError: discard
+    r.readerErr("Unsupported character literal: \\" & name)
+    NilV
+
 proc readToken(r: var Reader): string =
   result = ""
   while r.pos < r.src.len:
@@ -135,6 +162,8 @@ proc readForm(r: var Reader): Value =
     r.readerErr("Unmatched delimiter: " & c)
   of '"':
     return r.readString
+  of '\\':
+    return r.readChar
   of '\'':
     discard r.advance
     return mkList(@[mkSymbol("quote"), r.readForm])

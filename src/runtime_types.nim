@@ -4,7 +4,7 @@
 
 type
   Kind* = enum
-    kNil, kBool, kInt, kFloat, kStr, kKeyword, kSymbol,
+    kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword, kSymbol,
     kList, kVector, kMap, kSet, kCons, kChunk, kLazy, kFn
 
   VNode* = ref object
@@ -53,7 +53,7 @@ type
   Obj* = ref ValueObj
   ValueObj* = object
     case kind*: Kind
-    of kNil, kBool, kInt, kFloat: discard
+    of kNil, kBool, kInt, kFloat, kChar: discard
     of kStr, kKeyword, kSymbol: s*: string
     of kList: xs*: seq[Value]
     of kVector: vec*: PVec
@@ -133,7 +133,7 @@ proc `=destroy`*(x: var ValueObj) =
     `=destroy`(x.thunk)
     if not x.cached.isNil: pendingFree.add x.cached
     `=destroy`(x.cached)
-  of kNil, kBool, kInt, kFloat: discard
+  of kNil, kBool, kInt, kFloat, kChar: discard
   if draining: return
   draining = true
   while pendingFree.len > 0:

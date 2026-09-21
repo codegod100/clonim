@@ -15,7 +15,7 @@ proc isFloaty(vs: openArray[Value]): bool =
 
 proc intOf(v: Value): int64 =
   case v.kind
-  of kInt: v.i
+  of kInt, kChar: v.i
   of kFloat: int64(v.f)
   else: err("Not a number: " & prStr(v))
 
@@ -397,6 +397,80 @@ proc fusedCount*(base: Value, ops: openArray[FusedOp]): Value =
     inc n
   mkInt(n)
 
+proc parseIntRadix(s: string, radix: int): int64 =
+  ## Java's Integer/Long.parseInt: an optional sign, then digits in `radix`.
+  var i = 0
+  var neg = false
+  if i < s.len and (s[i] == '-' or s[i] == '+'):
+    neg = s[i] == '-'; inc i
+  if i >= s.len: err("Not a number: " & s)
+  while i < s.len:
+    let c = toLowerAscii(s[i])
+    let d = (if c in '0'..'9': ord(c) - ord('0')
+             elif c in 'a'..'z': ord(c) - ord('a') + 10
+             else: 99)
+    if d >= radix: err("Not a number: " & s)
+    result = result * int64(radix) + int64(d)
+    inc i
+  if neg: result = -result
+
+proc javaFormat(fmt: string, args: openArray[Value]): string =
+  ## The subset of java.util.Formatter that shows up in Clojure source:
+  ## %s %d %x %X %o %c %f %e %b, with flags "-0+ " and width.precision.
+  var ai = 0
+  var i = 0
+  while i < fmt.len:
+    if fmt[i] != '%': result.add fmt[i]; inc i; continue
+    inc i
+    if i < fmt.len and fmt[i] == '%': result.add '%'; inc i; continue
+    var flags = ""
+    while i < fmt.len and fmt[i] in {'-', '0', '+', ' ', ',', '#'}:
+      flags.add fmt[i]; inc i
+    var width = ""
+    while i < fmt.len and fmt[i].isDigit: width.add fmt[i]; inc i
+    var prec = -1
+    if i < fmt.len and fmt[i] == '.':
+      inc i
+      var p = ""
+      while i < fmt.len and fmt[i].isDigit: p.add fmt[i]; inc i
+      prec = parseInt(p)
+    if i >= fmt.len: err("Bad format string: " & fmt)
+    let conv = fmt[i]; inc i
+    if ai >= args.len: err("Too few arguments for format string: " & fmt)
+    let v = args[ai]; inc ai
+    var body: string
+    case conv
+    of 's', 'S':
+      body = str(v)
+      if prec >= 0 and body.len > prec: body = body[0 ..< prec]
+      if conv == 'S': body = body.toUpperAscii
+    of 'd': body = $intOf(v)
+    of 'x', 'X':
+      body = toHex(intOf(v)).strip(trailing = false, chars = {'0'})
+      if body.len == 0: body = "0"
+      body = (if conv == 'x': body.toLowerAscii else: body.toUpperAscii)
+    of 'o':
+      body = toOct(intOf(v), 22).strip(trailing = false, chars = {'0'})
+      if body.len == 0: body = "0"
+    of 'f': body = formatFloat(num(v), ffDecimal, (if prec < 0: 6 else: prec))
+    of 'e', 'E':
+      body = formatFloat(num(v), ffScientific, (if prec < 0: 6 else: prec))
+      if conv == 'E': body = body.toUpperAscii
+    of 'b': body = (if truthy(v): "true" else: "false")
+    of 'c': body = str(v)
+    of 'n': body = "\n"; dec ai
+    else: err("Unsupported format conversion: %" & conv
+    )
+    let w = (if width.len == 0: 0 else: parseInt(width))
+    if body.len < w:
+      let pad = w - body.len
+      if '-' in flags: body = body & " ".repeat(pad)
+      elif '0' in flags and conv in {'d', 'x', 'X', 'o', 'f', 'e', 'E'}:
+        if body.len > 0 and body[0] == '-': body = "-" & "0".repeat(pad) & body[1 .. ^1]
+        else: body = "0".repeat(pad) & body
+      else: body = " ".repeat(pad) & body
+    result.add body
+
 proc registerCore*() =
   # ---- arithmetic
   def "+", proc (a: openArray[Value]): Value =
@@ -465,6 +539,37 @@ proc registerCore*() =
   def "rand-int", proc (a: openArray[Value]): Value = mkInt(rand(int(intOf(a[0])) - 1))
   def "double", proc (a: openArray[Value]): Value = mkFloat(num(a[0]))
   def "int", proc (a: openArray[Value]): Value = mkInt(intOf(a[0]))
+  def "char", proc (a: openArray[Value]): Value =
+    (if a[0].kind == kChar: a[0] else: mkChar(intOf(a[0])))
+  def "char?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kChar)
+  def ".charAt", proc (a: openArray[Value]): Value =
+    let i = int(intOf(a[1]))
+    if i < 0 or i >= a[0].s.len: err("String index out of range: " & $i)
+    mkChar(int64(ord(a[0].s[i])))
+  def "Character/isDigit", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind == kChar and a[0].i >= int64(ord('0')) and a[0].i <= int64(ord('9')))
+  def "Character/isLetter", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind == kChar and char(a[0].i) in Letters)
+  def "Character/isWhitespace", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind == kChar and char(a[0].i) in {' ', '\t', '\n', '\r', '\f', '\v'})
+  def "long", proc (a: openArray[Value]): Value = mkInt(intOf(a[0]))
+  def "unchecked-int", proc (a: openArray[Value]): Value =
+    mkInt(int64(cast[int32](uint32(intOf(a[0]) and 0xffffffff'i64))))
+  def "unchecked-byte", proc (a: openArray[Value]): Value =
+    mkInt(int64(cast[int8](uint8(intOf(a[0]) and 0xff))))
+  def "Math/floor", proc (a: openArray[Value]): Value = mkFloat(floor(num(a[0])))
+  def "Math/ceil", proc (a: openArray[Value]): Value = mkFloat(ceil(num(a[0])))
+  def "Math/abs", proc (a: openArray[Value]): Value =
+    (if a[0].kind == kFloat: mkFloat(abs(a[0].f)) else: mkInt(abs(a[0].i)))
+  def "Integer/parseInt", proc (a: openArray[Value]): Value =
+    let radix = (if a.len > 1: int(intOf(a[1])) else: 10)
+    mkInt(parseIntRadix(a[0].s.strip, radix))
+  def "Long/parseLong", proc (a: openArray[Value]): Value =
+    let radix = (if a.len > 1: int(intOf(a[1])) else: 10)
+    mkInt(parseIntRadix(a[0].s.strip, radix))
+  def "Double/parseDouble", proc (a: openArray[Value]): Value =
+    try: mkFloat(parseFloat(a[0].s.strip))
+    except ValueError: err("Not a number: " & a[0].s)
 
   # ---- comparison / predicates
   def "=", proc (a: openArray[Value]): Value =
@@ -780,6 +885,45 @@ proc registerCore*() =
       r.add mkList(s[i ..< i + n]); i += n
     mkList(r)
 
+  def "partition-all", proc (a: openArray[Value]): Value =
+    let n = int(intOf(a[0]))
+    let step = (if a.len > 2: int(intOf(a[1])) else: n)
+    let s = toSeq(a[^1])
+    var r: seq[Value] = @[]
+    var i = 0
+    while i < s.len:
+      r.add mkList(s[i ..< min(i + n, s.len)]); i += step
+    mkList(r)
+  def "partition-by", proc (a: openArray[Value]): Value =
+    let s = toSeq(a[1])
+    var r: seq[Value] = @[]
+    var run: seq[Value] = @[]
+    var key = NilV
+    for x in s:
+      let k = call(a[0], [x])
+      if run.len == 0 or equals(k, key): run.add x
+      else:
+        r.add mkList(run); run = @[x]
+      key = k
+    if run.len > 0: r.add mkList(run)
+    mkList(r)
+  def "into", proc (a: openArray[Value]): Value =
+    result = a[0]
+    if a.len > 1:
+      for x in elems(a[1]): result = conjOne(result, x)
+  def "mapcat", proc (a: openArray[Value]): Value =
+    ## Like map, then concat: the fn takes one element from each collection.
+    var colls: seq[seq[Value]] = @[]
+    for i in 1 ..< a.len: colls.add toSeq(a[i])
+    var n = -1
+    for c in colls: (if n < 0 or c.len < n: n = c.len)
+    var r: seq[Value] = @[]
+    for i in 0 ..< max(n, 0):
+      var args: seq[Value] = @[]
+      for c in colls: args.add c[i]
+      for x in elems(call(a[0], args)): r.add x
+    mkList(r)
+
   # ---- higher order
   def "apply", proc (a: openArray[Value]): Value =
     var callArgs: seq[Value] = @[]
@@ -879,6 +1023,48 @@ proc registerCore*() =
     let nv = call(a[1], @[cur] & @(a[2 .. ^1]))
     call(a[0], [mkKeyword("set"), nv])
 
+  def "ex-message", proc (a: openArray[Value]): Value =
+    ## Thrown values reach a catch clause as their message string.
+    (if a[0].kind == kStr: a[0] else: NilV)
+  def "volatile!", proc (a: openArray[Value]): Value =
+    var cell = a[0]
+    mkFn("volatile", proc (args: openArray[Value]): Value =
+      if args.len == 0: return cell
+      cell = args[1]
+      cell)
+  def "vreset!", proc (a: openArray[Value]): Value =
+    call(a[0], [mkKeyword("set"), a[1]])
+  def "vswap!", proc (a: openArray[Value]): Value =
+    let cur = call(a[0], [])
+    call(a[0], [mkKeyword("set"), call(a[1], @[cur] & @(a[2 .. ^1]))])
+  def "boolean", proc (a: openArray[Value]): Value = mkBool(truthy(a[0]))
+  def "class", proc (a: openArray[Value]): Value = mkKeyword($a[0].kind)
+  def "instance?", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind == kKeyword and a[0].s == $a[1].kind)
+  def "format", proc (a: openArray[Value]): Value = mkStr(javaFormat(a[0].s, a[1 .. ^1]))
+  def "System/exit", proc (a: openArray[Value]): Value =
+    quit(if a.len > 0: int(intOf(a[0])) else: 0)
+  def "System/currentTimeMillis", proc (a: openArray[Value]): Value =
+    mkInt(int64(epochTime() * 1000))
+  def "System/getProperty", proc (a: openArray[Value]): Value =
+    ## Only the properties a hosted program can reasonably expect here.
+    case a[0].s
+    of "java.io.tmpdir": mkStr(getTempDir().strip(leading = false, chars = {'/'}))
+    of "user.dir": mkStr(getCurrentDir())
+    of "user.name": mkStr(getEnv("USER"))
+    of "line.separator": mkStr("\n")
+    else: (if a.len > 1: a[1] else: NilV)
+  def "clojure.string/blank?", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind == kNil or a[0].s.strip.len == 0)
+  def "clojure.string/starts-with?", proc (a: openArray[Value]): Value =
+    mkBool(a[0].s.startsWith(a[1].s))
+  def "clojure.string/ends-with?", proc (a: openArray[Value]): Value =
+    mkBool(a[0].s.endsWith(a[1].s))
+  def "clojure.string/includes?", proc (a: openArray[Value]): Value =
+    mkBool(a[1].s in a[0].s)
+  def "clojure.string/index-of", proc (a: openArray[Value]): Value =
+    let i = a[0].s.find(a[1].s)
+    (if i < 0: NilV else: mkInt(int64(i)))
   def "throw", proc (a: openArray[Value]): Value = err(str(a[0]))
   def "ex-info", proc (a: openArray[Value]): Value = mkStr(str(a[0]))
   def "time-ms", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))

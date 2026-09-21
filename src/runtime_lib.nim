@@ -24,6 +24,7 @@ proc clonim_truthy(v: Value): bool = truthy(v)
 
 proc clonim_mk_int(x: int64): Value = mkInt(x)
 proc clonim_mk_float(x: float64): Value = mkFloat(x)
+proc clonim_mk_char(code: int64): Value = mkChar(code)
 proc clonim_mk_str(x: string): Value = mkStr(x)
 proc clonim_mk_keyword(x: string): Value = mkKeyword(x)
 proc clonim_mk_symbol(x: string): Value = mkSymbol(x)

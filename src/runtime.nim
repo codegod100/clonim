@@ -6,7 +6,7 @@
 ## collection. Maps and sets additionally remember insertion order — every
 ## entry carries an `ord` stamp and iteration sorts by it — so printing and
 ## `keys`/`vals` stay predictable the way Clojure's small array-maps are.
-import std/[tables, strutils, hashes, bitops, algorithm]
+import std/[tables, strutils, hashes, bitops, algorithm, unicode]
 import runtime_types
 export runtime_types
 
@@ -267,6 +267,7 @@ proc mapEntries*(m: PMap): seq[MEntry] =
 proc mkBool*(x: bool): Value = (if x: TrueV else: FalseV)
 proc mkInt*(x: int64): Value {.inline.} = Value(kind: kInt, raw: x)
 proc mkFloat*(x: float64): Value {.inline.} = Value(kind: kFloat, raw: cast[int64](x))
+proc mkChar*(code: int64): Value {.inline.} = Value(kind: kChar, raw: code)
 proc mkStr*(x: string): Value = Value(kind: kStr, obj: Obj(kind: kStr, s: x))
 proc mkKeyword*(x: string): Value = Value(kind: kKeyword, obj: Obj(kind: kKeyword, s: x))
 proc mkSymbol*(x: string): Value = Value(kind: kSymbol, obj: Obj(kind: kSymbol, s: x))
@@ -445,6 +446,7 @@ proc hashValue*(v: Value): uint32 =
   of kNil: 0'u32
   of kBool: (if v.b: 0x9e3779b9'u32 else: 0x85ebca6b'u32)
   of kInt: uint32(hash(v.i))
+  of kChar: mixHash(5'u32, uint32(hash(v.i)))
   of kFloat:
     # ints and floats compare equal across kinds, so they must hash alike
     if v.f == float64(int64(v.f)): uint32(hash(int64(v.f)))
@@ -536,6 +538,7 @@ proc equals*(a, b: Value): bool =
   of kNil: true
   of kBool: a.b == b.b
   of kInt: a.i == b.i
+  of kChar: a.i == b.i
   of kFloat: a.f == b.f
   of kStr, kKeyword, kSymbol: a.s == b.s
   of kSet:
@@ -574,6 +577,17 @@ proc toStr*(v: Value, readable: bool): string =
     var s = $v.f
     if '.' notin s and 'e' notin s and 'n' notin s and 'i' notin s: s &= ".0"
     s
+  of kChar:
+    if not readable: $Rune(v.i)
+    else:
+      case v.i
+      of 10: "\\newline"
+      of 9: "\\tab"
+      of 13: "\\return"
+      of 8: "\\backspace"
+      of 12: "\\formfeed"
+      of 32: "\\space"
+      else: "\\" & $Rune(v.i)
   of kStr: (if readable: escapeStr(v.s) else: v.s)
   of kKeyword: ":" & v.s
   of kSymbol: v.s
@@ -635,11 +649,16 @@ proc call*(f: Value, args: openArray[Value]): Value =
     # (:k m) => lookup
     if args.len == 0: err("Wrong number of args to keyword")
     let m = args[0]
-    if m.isNil or m.kind != kMap: return NilV
+    if m.isNil or m.kind notin {kMap, kSet}: return NilV
     mapGet(m.m, f, (if args.len > 1: args[1] else: NilV))
   of kMap:
     if args.len == 0: err("Wrong number of args to map")
     mapGet(f.m, args[0], (if args.len > 1: args[1] else: NilV))
+  of kSet:
+    # (#{...} x) => the element, or nil
+    if args.len == 0: err("Wrong number of args to set")
+    if mapContains(f.m, args[0]): args[0]
+    else: (if args.len > 1: args[1] else: NilV)
   of kVector:
     if args.len != 1 or args[0].kind != kInt: err("Vector lookup needs one int")
     vecNth(f.vec, int(args[0].i))
