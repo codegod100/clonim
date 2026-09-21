@@ -44,4 +44,47 @@ accept: build
 
 # Remove build output
 clean:
-    rm -rf bin nimcache
+    rm -rf bin nimcache bench/bin
+
+# ---------------------------------------------------------------- benchmarks
+#
+# `just bench` above stays as it was: the two feature benchmarks, run through
+# the compiler with timing printed by the programs themselves. What follows
+# times whole processes instead, which is the only way to see startup, and can
+# put another Clojure toolchain beside clonim.
+
+# `just measure jolt` also builds and times the same programs under jolt, if it
+# is installed. Both toolchains get a `hello` binary so startup can be
+# subtracted; see bench/measure.py for why the numbers are best-of-N
+# round-robin rather than averaged.
+# Time bench/*.clj as native binaries, optionally against jolt.
+measure mode="solo": release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p bench/bin
+    for f in bench/*.clj; do
+        name=$(basename "$f" .clj)
+        ./{{bin}} build "$f" -o "bench/bin/$name" >/dev/null
+    done
+    if [ "{{mode}}" != "jolt" ]; then
+        exec python3 bench/measure.py
+    fi
+    if ! command -v jolt >/dev/null; then
+        echo "jolt is not installed; running clonim only" >&2
+        exec python3 bench/measure.py
+    fi
+    # jolt builds a namespace, not a file, so mirror each bench into a deps.edn
+    # project under a throwaway directory, wrapping the last form in a -main.
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    mkdir -p "$work/src"
+    echo '{:paths ["src"]}' > "$work/deps.edn"
+    for f in bench/*.clj; do
+        name=$(basename "$f" .clj)
+        { echo "(ns b$name)"
+          sed 's/^(println \(.*\))$/(defn -main [\& _] (println \1))/' "$f"
+        } > "$work/src/b$name.clj"
+        (cd "$work" && jolt build -m "b$name" -o "b$name" --opt >/dev/null)
+        cp "$work/b$name" "bench/bin/jolt-$name"
+    done
+    python3 bench/measure.py --with-jolt

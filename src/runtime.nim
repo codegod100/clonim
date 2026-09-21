@@ -442,10 +442,16 @@ proc cursor*(v: Value): Cursor =
   else: Cursor(isNode: false, backing: toSeq(v))
 
 proc hasNext*(c: var Cursor): bool =
-  if c.isNode:
-    c.node = force(c.node)
-    not c.node.isNil and c.node.kind == kCons
-  else: c.idx < c.backing.len
+  if not c.isNode: return c.idx < c.backing.len
+  c.node = force(c.node)
+  if c.node.isNil or c.node.kind == kNil: return false
+  if c.node.kind == kCons: return true
+  # The tail bottomed out in a concrete collection, as `(cons x [1 2])` does.
+  # Switch to indexing it rather than reporting the seq as finished.
+  c.isNode = false
+  c.backing = toSeq(c.node)
+  c.idx = 0
+  c.idx < c.backing.len
 
 proc next*(c: var Cursor): Value =
   if c.isNode:
@@ -732,3 +738,9 @@ proc toSeq*(v: Value): seq[Value] =
   else: err("Don't know how to create seq from: " & prStr(v))
 
 let emptyArgs*: seq[Value] = @[]
+
+## True while a var still holds the exact fn a call site was compiled against.
+## Call sites that bind a known-arity fn or an inlined primitive directly guard
+## on this, so a later `def` that rebinds the name still takes effect.
+proc cellIs*(c: VarCell, v: Value): bool {.inline.} =
+  c.bound and c.v == v

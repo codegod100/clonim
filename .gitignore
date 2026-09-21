@@ -2,3 +2,4 @@ bin/
 nimcache/
 .clj-kondo/.cache/
 .lsp/
+bench/bin/

@@ -40,6 +40,101 @@ proc cmpChain(args: seq[Value], ok: proc (c: int): bool): Value =
     if not ok(c): return FalseV
   TrueV
 
+# ------------------------------------------------------- inlinable primitives
+## Two-argument forms of the arithmetic and comparison builtins, exported so
+## call sites can inline them instead of dispatching through a closure and an
+## argument list, and so the analyzer has something to compile an integer
+## expression down to. Each takes the int/int path in a couple of instructions
+## and otherwise falls back to the same numeric-tower behaviour as the generic
+## builtin.
+
+## Integer division that reports rather than trapping: Nim's `div` raises an
+## uncatchable defect on a zero divisor, where `/` here already errored.
+proc idiv*(a, b: int64): int64 {.inline.} =
+  if b == 0: err("Divide by zero")
+  a div b
+
+proc irem*(a, b: int64): int64 {.inline.} =
+  if b == 0: err("Divide by zero")
+  a mod b
+
+proc add2*(a, b: Value): Value {.inline.} =
+  if a.kind == kInt and b.kind == kInt: mkInt(a.i + b.i)
+  else: mkFloat(num(a) + num(b))
+
+proc sub2*(a, b: Value): Value {.inline.} =
+  if a.kind == kInt and b.kind == kInt: mkInt(a.i - b.i)
+  else: mkFloat(num(a) - num(b))
+
+proc mul2*(a, b: Value): Value {.inline.} =
+  if a.kind == kInt and b.kind == kInt: mkInt(a.i * b.i)
+  else: mkFloat(num(a) * num(b))
+
+proc lt2*(a, b: Value): Value {.inline.} =
+  if a.kind == kInt and b.kind == kInt: mkBool(a.i < b.i)
+  else: mkBool(num(a) < num(b))
+
+proc gt2*(a, b: Value): Value {.inline.} =
+  if a.kind == kInt and b.kind == kInt: mkBool(a.i > b.i)
+  else: mkBool(num(a) > num(b))
+
+proc le2*(a, b: Value): Value {.inline.} =
+  if a.kind == kInt and b.kind == kInt: mkBool(a.i <= b.i)
+  else: mkBool(num(a) <= num(b))
+
+proc ge2*(a, b: Value): Value {.inline.} =
+  if a.kind == kInt and b.kind == kInt: mkBool(a.i >= b.i)
+  else: mkBool(num(a) >= num(b))
+
+proc eq2*(a, b: Value): Value {.inline.} =
+  if a.kind == kInt and b.kind == kInt: mkBool(a.i == b.i)
+  else: mkBool(equals(a, b))
+
+proc ne2*(a, b: Value): Value {.inline.} =
+  if a.kind == kInt and b.kind == kInt: mkBool(a.i != b.i)
+  else: mkBool(not equals(a, b))
+
+proc inc1*(a: Value): Value {.inline.} =
+  if a.kind == kInt: mkInt(a.i + 1) else: mkFloat(num(a) + 1.0)
+
+proc dec1*(a: Value): Value {.inline.} =
+  if a.kind == kInt: mkInt(a.i - 1) else: mkFloat(num(a) - 1.0)
+
+## Guarded forms: the whole call site, cell check included, as one expression,
+## for the call sites where a def in the program can still rebind the name.
+proc add2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
+  if cellIs(c, k): add2(a, b) else: call(cellGet(c), @[a, b])
+
+proc sub2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
+  if cellIs(c, k): sub2(a, b) else: call(cellGet(c), @[a, b])
+
+proc mul2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
+  if cellIs(c, k): mul2(a, b) else: call(cellGet(c), @[a, b])
+
+proc lt2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
+  if cellIs(c, k): lt2(a, b) else: call(cellGet(c), @[a, b])
+
+proc gt2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
+  if cellIs(c, k): gt2(a, b) else: call(cellGet(c), @[a, b])
+
+proc le2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
+  if cellIs(c, k): le2(a, b) else: call(cellGet(c), @[a, b])
+
+proc ge2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
+  if cellIs(c, k): ge2(a, b) else: call(cellGet(c), @[a, b])
+
+proc eq2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
+  if cellIs(c, k): eq2(a, b) else: call(cellGet(c), @[a, b])
+
+proc ne2g*(c: VarCell, k: Value, a, b: Value): Value {.inline.} =
+  if cellIs(c, k): ne2(a, b) else: call(cellGet(c), @[a, b])
+
+proc inc1g*(c: VarCell, k: Value, a: Value): Value {.inline.} =
+  if cellIs(c, k): inc1(a) else: call(cellGet(c), @[a])
+
+proc dec1g*(c: VarCell, k: Value, a: Value): Value {.inline.} =
+  if cellIs(c, k): dec1(a) else: call(cellGet(c), @[a])
+
 proc getIn(coll, k, dflt: Value): Value =
   if coll.isNil or coll.kind == kNil: return dflt
   case coll.kind
@@ -232,11 +327,11 @@ proc registerCore*() =
       for i in 1 ..< a.len:
         if a[i].kind == kInt and a[i].i == 0: err("Divide by zero")
       arith("/", a, 1, proc (x, y: int64): int64 = x div y, proc (x, y: float64): float64 = x / y)
-  def "quot", proc (a: seq[Value]): Value = mkInt(intOf(a[0]) div intOf(a[1]))
-  def "rem", proc (a: seq[Value]): Value = mkInt(intOf(a[0]) mod intOf(a[1]))
+  def "quot", proc (a: seq[Value]): Value = mkInt(idiv(intOf(a[0]), intOf(a[1])))
+  def "rem", proc (a: seq[Value]): Value = mkInt(irem(intOf(a[0]), intOf(a[1])))
   def "mod", proc (a: seq[Value]): Value =
     let x = intOf(a[0]); let y = intOf(a[1])
-    var r = x mod y
+    var r = irem(x, y)
     if r != 0 and ((r < 0) != (y < 0)): r += y
     mkInt(r)
   def "inc", proc (a: seq[Value]): Value =

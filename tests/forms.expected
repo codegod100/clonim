@@ -1,0 +1,7 @@
+dotimes 10
+doseq 19
+caught: Divide by zero
+finally ran: 99
+12 9
+:b
+nested 7
