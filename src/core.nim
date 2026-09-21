@@ -198,12 +198,17 @@ proc lazyOf(c: Cursor): Value =
     mkCons(x, lazyOf(cc)))
 
 proc lazyMap(f: Value, c: Cursor): Value =
+  ## Chunked, which means f runs for up to ChunkSize elements as soon as the
+  ## first is demanded -- the same trade Clojure makes. f must not be relied on
+  ## for per-element side effects; `doseq` and `run!` are the tools for that.
   let cur = c
   mkLazy(proc (): Value =
     var cc = cur
-    if not hasNext(cc): return NilV
-    let x = next(cc)
-    mkCons(call(f, @[x]), lazyMap(f, cc)))
+    var xs = newSeqOfCap[Value](ChunkSize)
+    while xs.len < ChunkSize and hasNext(cc):
+      xs.add call(f, @[next(cc)])
+    if xs.len == 0: return NilV
+    mkChunk(xs, 0, lazyMap(f, cc)))
 
 proc lazyMapN(f: Value, cs: seq[Cursor]): Value =
   let curs = cs
@@ -224,23 +229,32 @@ proc lazyMapIndexed(f: Value, i: int64, c: Cursor): Value =
     mkCons(call(f, @[mkInt(i), x]), lazyMapIndexed(f, i + 1, cc)))
 
 proc lazyFilter(pred: Value, c: Cursor, keep: bool): Value =
+  ## Draws up to ChunkSize source elements per step and emits whichever pass,
+  ## rather than pulling until ChunkSize have passed: that keeps the work per
+  ## step bounded when matches are rare in a long or infinite source.
   let cur = c
   mkLazy(proc (): Value =
     var cc = cur
-    while hasNext(cc):
-      let x = next(cc)
-      if truthy(call(pred, @[x])) == keep:
-        return mkCons(x, lazyFilter(pred, cc, keep))
-    NilV)
+    while true:
+      var xs = newSeqOfCap[Value](ChunkSize)
+      var drawn = 0
+      while drawn < ChunkSize and hasNext(cc):
+        let x = next(cc)
+        if truthy(call(pred, @[x])) == keep: xs.add x
+        inc drawn
+      if xs.len > 0: return mkChunk(xs, 0, lazyFilter(pred, cc, keep))
+      if drawn == 0: return NilV)
 
 proc lazyTake(n: int, c: Cursor): Value =
   if n <= 0: return mkList(@[])
   let cur = c
   mkLazy(proc (): Value =
     var cc = cur
-    if not hasNext(cc): return NilV
-    let x = next(cc)
-    mkCons(x, lazyTake(n - 1, cc)))
+    var want = min(n, ChunkSize)
+    var xs = newSeqOfCap[Value](want)
+    while xs.len < want and hasNext(cc): xs.add next(cc)
+    if xs.len == 0: return NilV
+    mkChunk(xs, 0, lazyTake(n - xs.len, cc)))
 
 proc lazyDrop(n: int, c: Cursor): Value =
   let cur = c
@@ -271,9 +285,18 @@ proc lazyDropWhile(pred: Value, c: Cursor): Value =
       cc = peek)
 
 proc lazyRange(i, hi, step: int64, bounded: bool): Value =
+  ## Chunked: one thunk and one chunk per ChunkSize elements rather than a
+  ## cons and a thunk each. An unbounded range stays lazy -- it just realizes
+  ## a bounded batch at a time.
   mkLazy(proc (): Value =
-    if bounded and ((step > 0 and i >= hi) or (step < 0 and i <= hi)): return NilV
-    mkCons(mkInt(i), lazyRange(i + step, hi, step, bounded)))
+    var cur = i
+    var xs = newSeqOfCap[Value](ChunkSize)
+    while xs.len < ChunkSize:
+      if bounded and ((step > 0 and cur >= hi) or (step < 0 and cur <= hi)): break
+      xs.add mkInt(cur)
+      cur += step
+    if xs.len == 0: return NilV
+    mkChunk(xs, 0, lazyRange(cur, hi, step, bounded)))
 
 proc lazyIterate(f, x: Value): Value =
   mkLazy(proc (): Value = mkCons(x, lazyIterate(f, call(f, @[x]))))
@@ -636,12 +659,16 @@ proc registerCore*() =
   def "remove", proc (a: seq[Value]): Value =
     lazyFilter(a[0], cursor(a[1]), keep = false)
   def "reduce", proc (a: seq[Value]): Value =
+    ## Streams the source rather than materializing it, so folding a lazy seq
+    ## holds one chunk at a time instead of the whole sequence.
     let f = a[0]
     if a.len == 2:
-      let s = toSeq(a[1])
-      if s.len == 0: return call(f, @[])
-      var acc = s[0]
-      for i in 1 ..< s.len: acc = call(f, @[acc, s[i]])
+      var acc = NilV
+      var first = true
+      for x in elems(a[1]):
+        if first: acc = x; first = false
+        else: acc = call(f, @[acc, x])
+      if first: return call(f, @[])
       return acc
     var acc = a[1]
     for x in elems(a[2]): acc = call(f, @[acc, x])

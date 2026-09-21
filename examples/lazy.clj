@@ -13,7 +13,10 @@
 (println (take 5 (concat [1 2] (range))))
 (println (first (map inc (range))) (second (range)) (nth (range) 1000))
 
-;; nothing beyond the demand is computed, and each cell is computed once
+;; nothing beyond the demand is computed, and each cell is computed once.
+;; Seqs are chunked, so demand is rounded up to a batch of 32: taking 3 runs
+;; the mapped fn 32 times, exactly as it does in Clojure. Construction still
+;; runs it zero times, and a second pass recomputes nothing.
 (def calls (atom 0))
 (def xs (map (fn [x] (reset! calls (inc (deref calls))) x) (range 1000)))
 (println "built, calls so far:" (deref calls))

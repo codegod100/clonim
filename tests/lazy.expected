@@ -10,8 +10,8 @@
 (1 2 0 1 2)
 1 1 1000
 built, calls so far: 0
-took (0 1 2) - calls: 3
-took (0 1 2) - calls: 3 (memoized)
+took (0 1 2) - calls: 32
+took (0 1 2) - calls: 32 (memoized)
 1330
 0 1 (2 3 4)
 (2 3 4) (2 4)

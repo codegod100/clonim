@@ -17,7 +17,7 @@ const
 type
   Kind* = enum
     kNil, kBool, kInt, kFloat, kStr, kKeyword, kSymbol,
-    kList, kVector, kMap, kSet, kCons, kLazy, kFn
+    kList, kVector, kMap, kSet, kCons, kChunk, kLazy, kFn
 
   VNode* = ref object
     ## A trie node: leaves hold values, internal nodes hold children.
@@ -70,6 +70,12 @@ type
     of kCons:
       head*: Value
       tl*: Value       ## rest of the seq: a cons, a lazy seq, a coll, or nil
+    of kChunk:
+      ## A run of elements already realized together, plus the rest of the seq.
+      ## One of these per 32 elements replaces 32 cons cells and 32 thunks.
+      chunk*: seq[Value]
+      coff*: int       ## index of the first element not yet consumed
+      ctl*: Value      ## rest of the seq beyond this run
     of kLazy:
       thunk*: proc (): Value {.closure.}
       cached*: Value
@@ -107,6 +113,10 @@ proc `=destroy`*(x: var ValueObj) =
     `=destroy`(x.head)
     if not x.tl.isNil: pendingFree.add x.tl   # +1, outlives the release below
     `=destroy`(x.tl)
+  of kChunk:
+    `=destroy`(x.chunk)
+    if not x.ctl.isNil: pendingFree.add x.ctl
+    `=destroy`(x.ctl)
   of kLazy:
     `=destroy`(x.thunk)
     if not x.cached.isNil: pendingFree.add x.cached
@@ -407,6 +417,16 @@ proc mkFn*(name: string, f: proc (args: seq[Value]): Value {.closure.}): Value =
 
 proc mkCons*(h, t: Value): Value = Value(kind: kCons, head: h, tl: t)
 
+const ChunkSize* = 32
+  ## Elements realized per step by a chunked producer. The same batch size
+  ## Clojure uses: big enough to amortize the per-step allocation, small enough
+  ## that an infinite seq still costs a bounded amount to look at.
+
+proc mkChunk*(xs: sink seq[Value], off: int, rest: Value): Value =
+  ## Normalizes an exhausted chunk away, so a cursor never sees an empty run.
+  if off >= xs.len: return (if rest.isNil: NilV else: rest)
+  Value(kind: kChunk, chunk: xs, coff: off, ctl: rest)
+
 proc mkLazy*(f: proc (): Value {.closure.}): Value =
   Value(kind: kLazy, thunk: f, cached: nil, forced: false)
 
@@ -423,43 +443,64 @@ proc force*(v: Value): Value =
   cur
 
 proc isSeqNode(v: Value): bool =
-  not v.isNil and v.kind in {kCons, kLazy}
+  not v.isNil and v.kind in {kCons, kChunk, kLazy}
 
 type Cursor* = object
-  ## Walks any seqable value without materializing it. Cons/lazy chains are
-  ## followed link by link; concrete collections are indexed.
-  node: Value
-  backing: seq[Value]
+  ## Walks any seqable value without materializing it. A chunk is indexed
+  ## where it lies -- copying its elements into the cursor would undo the point
+  ## of chunking -- a concrete collection is indexed through `backing`, and
+  ## cons/lazy links are followed one at a time. `node` is the unrealized rest.
+  run: Value            ## kChunk currently being indexed, else nil
+  backing: seq[Value]   ## concrete collection being indexed, else empty
   idx: int
-  isNode: bool
+  node: Value
 
 proc cursor*(v: Value): Cursor =
-  ## Forces nothing: a cons/lazy value is walked link by link, and `hasNext`
-  ## is the only thing that ever forces. So building `(take 3 (map f xs))`
-  ## runs `f` zero times until something asks for an element.
-  if v.isNil: return Cursor(isNode: false)
-  if v.kind in {kCons, kLazy, kNil}: Cursor(isNode: true, node: v)
-  else: Cursor(isNode: false, backing: toSeq(v))
+  ## Forces nothing: `hasNext` is the only thing that ever forces, so building
+  ## `(take 3 (map f xs))` runs `f` zero times until something asks for an
+  ## element.
+  if v.isNil: return Cursor()
+  if v.kind in {kCons, kChunk, kLazy, kNil}: Cursor(node: v)
+  else: Cursor(backing: toSeq(v))
 
 proc hasNext*(c: var Cursor): bool =
-  if not c.isNode: return c.idx < c.backing.len
-  c.node = force(c.node)
-  if c.node.isNil or c.node.kind == kNil: return false
-  if c.node.kind == kCons: return true
-  # The tail bottomed out in a concrete collection, as `(cons x [1 2])` does.
-  # Switch to indexing it rather than reporting the seq as finished.
-  c.isNode = false
-  c.backing = toSeq(c.node)
-  c.idx = 0
-  c.idx < c.backing.len
+  while true:
+    if not c.run.isNil:
+      if c.idx < c.run.chunk.len: return true
+      c.run = nil
+      c.idx = 0
+    elif c.idx < c.backing.len:
+      return true
+    if c.node.isNil: return false
+    c.node = force(c.node)
+    if c.node.isNil or c.node.kind == kNil:
+      c.node = nil
+      return false
+    case c.node.kind
+    of kCons:
+      return true                     # the element is c.node.head
+    of kChunk:
+      c.run = c.node
+      c.idx = c.node.coff
+      c.backing = @[]
+      c.node = c.node.ctl
+    else:
+      # The tail bottomed out in a concrete collection, as `(cons x [1 2])`
+      # does. Switch to indexing it rather than reporting the seq as finished.
+      c.backing = toSeq(c.node)
+      c.idx = 0
+      c.node = nil
 
 proc next*(c: var Cursor): Value =
-  if c.isNode:
-    result = c.node.head
-    c.node = c.node.tl
-  else:
+  if not c.run.isNil:
+    result = c.run.chunk[c.idx]
+    inc c.idx
+  elif c.idx < c.backing.len:
     result = c.backing[c.idx]
     inc c.idx
+  else:
+    result = c.node.head              # valid only just after hasNext saw a cons
+    c.node = c.node.tl
 
 iterator elems*(v: Value): Value =
   ## The one way to walk a collection in core: works for lists, vectors, maps,
@@ -472,6 +513,7 @@ proc seqFirst*(v: Value): Value =
   let f = force(v)
   if f.isNil: return NilV
   if f.kind == kCons: return f.head
+  if f.kind == kChunk: return f.chunk[f.coff]
   var c = cursor(f)
   (if hasNext(c): next(c) else: NilV)
 
@@ -481,6 +523,9 @@ proc seqRest*(v: Value): Value =
   let f = force(v)
   if f.isNil or f.kind == kNil: return mkList(@[])
   if f.kind == kCons: return (if f.tl.isNil: mkList(@[]) else: f.tl)
+  if f.kind == kChunk:
+    let r = mkChunk(f.chunk, f.coff + 1, f.ctl)
+    return (if r.isNil or r.kind == kNil: mkList(@[]) else: r)
   let xs = toSeq(f)
   (if xs.len <= 1: mkList(@[]) else: mkList(xs[1 .. ^1]))
 
@@ -512,7 +557,7 @@ proc hashValue*(v: Value): uint32 =
   of kStr: mixHash(1'u32, uint32(hash(v.s)))
   of kKeyword: mixHash(2'u32, uint32(hash(v.s)))
   of kSymbol: mixHash(3'u32, uint32(hash(v.s)))
-  of kList, kVector, kCons, kLazy:
+  of kList, kVector, kCons, kChunk, kLazy:
     # sequentials are `=` when their elements are, so they hash alike
     var h = 7'u32
     for x in elems(v): h = mixHash(h, hashValue(x))
@@ -540,7 +585,7 @@ proc items*(v: Value): seq[Value] =
     var r = newSeqOfCap[Value](v.m.cnt)
     for e in mapEntries(v.m): r.add e.key
     r
-  of kCons, kLazy:
+  of kCons, kChunk, kLazy:
     var r: seq[Value] = @[]
     var c = cursor(v)
     while hasNext(c): r.add next(c)
@@ -560,7 +605,7 @@ proc count*(v: Value): int =
   of kVector: v.vec.cnt
   of kMap, kSet: v.m.cnt
   of kStr: v.s.len
-  of kCons, kLazy:
+  of kCons, kChunk, kLazy:
     # realizes the whole seq, which is the honest cost of counting one
     var n = 0
     var c = cursor(v)
@@ -582,7 +627,7 @@ proc equals*(a, b: Value): bool =
   if a.kind == kInt and b.kind == kFloat: return float64(a.i) == b.f
   if a.kind == kFloat and b.kind == kInt: return a.f == float64(b.i)
   # every sequential thing is `=` to every other with the same elements
-  const Seqs = {kList, kVector, kCons, kLazy}
+  const Seqs = {kList, kVector, kCons, kChunk, kLazy}
   if a.kind in Seqs and b.kind in Seqs:
     var ca = cursor(a)
     var cb = cursor(b)
@@ -610,7 +655,7 @@ proc equals*(a, b: Value): bool =
       if not equals(e.val, mapGet(b.m, e.key, missing)): return false
     true
   of kFn: a == b
-  of kList, kVector, kCons, kLazy: false  # handled above
+  of kList, kVector, kCons, kChunk, kLazy: false  # handled above
 # ---------------------------------------------------------------- printing
 proc escapeStr(s: string): string =
   result = "\""
@@ -637,7 +682,7 @@ proc toStr*(v: Value, readable: bool): string =
   of kStr: (if readable: escapeStr(v.s) else: v.s)
   of kKeyword: ":" & v.s
   of kSymbol: v.s
-  of kList, kCons, kLazy:
+  of kList, kCons, kChunk, kLazy:
     # printing a lazy seq realizes it, exactly as in Clojure
     var parts: seq[string] = @[]
     for x in elems(v): parts.add toStr(x, readable)
@@ -726,7 +771,7 @@ proc toSeq*(v: Value): seq[Value] =
   if v.isNil: return @[]
   case v.kind
   of kNil: @[]
-  of kList, kVector, kSet, kCons, kLazy: v.items
+  of kList, kVector, kSet, kCons, kChunk, kLazy: v.items
   of kStr:
     var r: seq[Value] = @[]
     for c in v.s: r.add mkStr($c)
