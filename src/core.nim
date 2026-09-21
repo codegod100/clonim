@@ -1,5 +1,5 @@
 ## clonim core — clojure.core builtins, registered into the global var table.
-import std/[strutils, math, times, random, re, os, httpclient]
+import std/[strutils, math, times, random, re, os, httpclient, sequtils]
 import runtime
 
 proc num(v: Value): float64 =
@@ -544,6 +544,29 @@ proc registerCore*() =
   def "slurp", proc (a: openArray[Value]): Value = mkStr(readFile(a[0].s))
   def "spit", proc (a: openArray[Value]): Value =
     writeFile(a[0].s, str(a[1])); NilV
+  def "int-array", proc (a: openArray[Value]): Value =
+    if a.len == 1 and a[0].kind == kInt: mkList(newSeqWith(int(a[0].i), mkInt(0)))
+    elif a.len == 1: mkList(toSeq(a[0])) else: mkList(a)
+  def "long-array", proc (a: openArray[Value]): Value =
+    if a.len == 1 and a[0].kind == kInt: mkList(newSeqWith(int(a[0].i), mkInt(0)))
+    elif a.len == 1: mkList(toSeq(a[0])) else: mkList(a)
+  def "byte-array", proc (a: openArray[Value]): Value =
+    if a.len == 1: mkList(toSeq(a[0])) else: mkList(a)
+  def "alength", proc (a: openArray[Value]): Value = mkInt(count(a[0]))
+  def "aget", proc (a: openArray[Value]): Value =
+    let i = int(intOf(a[1]))
+    if a[0].kind == kList: a[0].obj.xs[i] else: toSeq(a[0])[i]
+  def "aset", proc (a: openArray[Value]): Value =
+    if a[0].kind != kList: err("aset expects an array")
+    a[0].obj.xs[int(intOf(a[1]))] = a[2]; a[2]
+  def "System/arraycopy", proc (a: openArray[Value]): Value =
+    for i in 0 ..< int(intOf(a[4])):
+      a[2].obj.xs[int(intOf(a[3])) + i] = a[0].obj.xs[int(intOf(a[1])) + i]
+    NilV
+  def ".getBytes", proc (a: openArray[Value]): Value =
+    var xs: seq[Value] = @[]
+    for ch in a[0].s: xs.add mkInt(ord(ch))
+    mkList(xs)
   def "*delete-file*", proc (a: openArray[Value]): Value =
     try:
       removeFile(a[0].s)

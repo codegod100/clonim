@@ -99,9 +99,10 @@ proc checkVar(r: Resolver, ns: Namespace, target, name: string,
   if target == "clojure.core":
     if name in r.cores or (allowSyntax and name in syntaxHeads): return
     fail("no definition " & canonical)
+  # JVM-style host calls (for example System/arraycopy) are globally provided.
+  if canonical in r.hosts: return
   if target != ns.name and target notin ns.required:
     fail("namespace " & target & " is not required by " & ns.name)
-  if canonical in r.hosts: return
   if not r.spaces.hasKey(target) or name notin r.spaces[target].defs:
     fail("no definition " & canonical)
   if target != ns.name and name in r.spaces[target].privateDefs:
