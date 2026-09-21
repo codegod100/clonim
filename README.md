@@ -25,9 +25,9 @@ see [benchmark history](bench/README.md) for metrics and exit codes.
 
 `just release` builds the compiler and its private static runtime. Version tags
 matching `v*` trigger the release workflow, which packages both into a single
-Linux x86_64 AppImage together with Nim 2.2.12. Generated programs statically
-link the runtime and are standalone. The build machine needs a system C
-compiler and linker, but does not need Nim installed separately.
+Linux x86_64 AppImage together with Nim 2.2.12 and Zig 0.15.2 as the private C
+compiler/linker. The AppImage has no external build dependencies. Generated
+programs statically link the clonim runtime and are standalone.
 
 Source-level libraries are loaded explicitly. Use
 `(require '[clonim.core :refer [now-ms]])` to load `stdlib/clonim/core.clj`. Host-dependent operations remain small runtime primitives; for

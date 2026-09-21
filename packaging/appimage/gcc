@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+zig_root=$(CDPATH= cd -- "$(dirname -- "$0")/../lib/zig" && pwd)
+cache_root=${XDG_CACHE_HOME:-${TMPDIR:-/tmp}}
+ZIG_GLOBAL_CACHE_DIR="$cache_root/clonim-zig/global"
+ZIG_LOCAL_CACHE_DIR="$cache_root/clonim-zig/local"
+export ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR
+mkdir -p "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR"
+
+exec "$zig_root/zig" cc -target x86_64-linux-gnu "$@"

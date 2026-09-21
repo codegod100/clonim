@@ -67,13 +67,6 @@ jobs:
 
       - name: Build optimized compiler
         run: |
-          mkdir -p lib
-          nim c --app:staticlib --nimMainPrefix:ClonimRuntime \
-            --hints:off --warnings:off --nimcache:lib/nimcache-debug \
-            -o:lib/libclonim_runtime_debug.a src/runtime_lib.nim
-          nim c -d:release --app:staticlib --nimMainPrefix:ClonimRuntime \
-            --hints:off --warnings:off --nimcache:lib/nimcache-release \
-            -o:lib/libclonim_runtime.a src/runtime_lib.nim
           nim c -d:release -d:releaseCompiler --hints:off --warnings:off \
             -o:bin/clonim src/clonim.nim
 
@@ -81,13 +74,23 @@ jobs:
         run: |
           appdir=dist/clonim.AppDir
           install -Dm755 bin/clonim "$appdir/usr/bin/clonim"
-          install -Dm644 lib/libclonim_runtime.a \
-            "$appdir/usr/bin/libclonim_runtime.a"
           nim_bin=$(readlink -f "$(command -v nim)")
           nim_root=$(dirname "$(dirname "$nim_bin")")
           install -Dm755 "$nim_bin" "$appdir/usr/bin/nim"
           cp -a "$nim_root/lib/." "$appdir/usr/lib/"
           cp -a "$nim_root/config" "$appdir/usr/config"
+          install -Dm755 packaging/appimage/gcc "$appdir/usr/bin/gcc"
+          ln -s gcc "$appdir/usr/bin/cc"
+
+          curl --fail --location --silent --show-error \
+            https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz \
+            -o /tmp/zig-x86_64-linux-0.15.2.tar.xz
+          echo "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239  /tmp/zig-x86_64-linux-0.15.2.tar.xz" \
+            | sha256sum --check
+          mkdir -p "$appdir/usr/lib/zig"
+          tar --extract --xz --file /tmp/zig-x86_64-linux-0.15.2.tar.xz \
+            --strip-components=1 --directory "$appdir/usr/lib/zig"
+
           install -Dm755 packaging/appimage/AppRun "$appdir/AppRun"
           install -Dm644 packaging/appimage/clonim.desktop \
             "$appdir/clonim.desktop"
@@ -121,9 +124,9 @@ jobs:
             Linux x86_64 release of clonim.
 
             Download the AppImage, make it executable, and run it. It contains
-            the compiler, Nim 2.2.12, and clonim's private static runtime.
-            Generated programs statically link the runtime and are standalone.
-            A system C compiler and linker are required to build programs.
+            clonim, Nim 2.2.12, Zig 0.15.2 as its C compiler/linker, and clonim's
+            private static runtime. It has no external build dependencies, and
+            generated programs statically link the clonim runtime.
           draft: false
           prerelease: false
           files: dist/clonim-linux-x86_64.AppImage

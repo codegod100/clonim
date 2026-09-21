@@ -8,8 +8,12 @@ import runtime, compiler
 
 when defined(releaseCompiler):
   const
-    EmbeddedAppRuntime = staticRead("app_runtime.nim")
+    EmbeddedAppRuntime = staticRead("app_runtime_source.nim")
     EmbeddedRuntimeTypes = staticRead("runtime_types.nim")
+    EmbeddedRuntime = staticRead("runtime.nim")
+    EmbeddedCore = staticRead("core.nim")
+    EmbeddedNamespaces = staticRead("namespaces.nim")
+    EmbeddedReader = staticRead("reader.nim")
     EmbeddedCoreStdlib = staticRead("../stdlib/clonim/core.clj")
 
   proc embeddedRoot(): string =
@@ -17,16 +21,24 @@ when defined(releaseCompiler):
     ## runtime implementation remains the separately shipped static archive.
     var h: Hash = hash(EmbeddedAppRuntime)
     h = h !& hash(EmbeddedRuntimeTypes)
+    h = h !& hash(EmbeddedRuntime)
+    h = h !& hash(EmbeddedCore)
+    h = h !& hash(EmbeddedNamespaces)
+    h = h !& hash(EmbeddedReader)
     h = h !& hash(EmbeddedCoreStdlib)
     result = getTempDir() / "clonim-runtime" / $(!$h)
     let files = [
       (result / "src" / "app_runtime.nim", EmbeddedAppRuntime),
       (result / "src" / "runtime_types.nim", EmbeddedRuntimeTypes),
+      (result / "src" / "runtime.nim", EmbeddedRuntime),
+      (result / "src" / "core.nim", EmbeddedCore),
+      (result / "src" / "namespaces.nim", EmbeddedNamespaces),
+      (result / "src" / "reader.nim", EmbeddedReader),
       (result / "stdlib" / "clonim" / "core.clj", EmbeddedCoreStdlib),
     ]
     for (path, contents) in files:
       createDir(path.parentDir)
-      if not fileExists(path) or getFileSize(path) != contents.len:
+      if not fileExists(path) or readFile(path) != contents:
         writeFile(path, contents)
 
 proc usage() =
@@ -56,11 +68,6 @@ proc srcDir(): string =
 proc runtimeLib(release: bool): string =
   ## Release archives place the private runtime beside bin/. A source checkout
   ## builds the same archive into lib/ on first use.
-  when defined(releaseCompiler):
-    let shipped = getAppDir() / "libclonim_runtime.a"
-    if fileExists(shipped): return shipped
-    raise newException(IOError,
-      "missing runtime library beside compiler: " & shipped)
   let libName = (if release: "libclonim_runtime.a" else: "libclonim_runtime_debug.a")
   let installed = getAppDir().parentDir / "lib" / libName
   let source = srcDir() / "runtime_lib.nim"
@@ -98,7 +105,8 @@ proc buildKey(nimSrc: string, release: bool, rtLib: string): string =
   let nimExe = findExe("nim")
   if nimExe.len > 0:
     h = h !& hash($getLastModificationTime(nimExe))
-  h = h !& hash($getLastModificationTime(rtLib))
+  if rtLib.len > 0:
+    h = h !& hash($getLastModificationTime(rtLib))
   $(!$h)
 
 proc main() =
@@ -179,18 +187,21 @@ proc main() =
   # and the Nim compiler itself.
   let stamp = work / "stamp"
   var rtLib = ""
-  try:
-    rtLib = runtimeLib(release)
-  except IOError, OSError:
-    stderr.writeLine("clonim: " & getCurrentExceptionMsg())
-    quit(1)
+  when not defined(releaseCompiler):
+    try:
+      rtLib = runtimeLib(release)
+    except IOError, OSError:
+      stderr.writeLine("clonim: " & getCurrentExceptionMsg())
+      quit(1)
   let cached = cmd == "run" and fileExists(outBin) and fileExists(stamp) and
                readFile(stamp) == buildKey(nimSrc, release, rtLib)
 
   var nimCmd = @["nim", "c", "--hints:off", "--warnings:off",
                  "--path:" & srcDir(), "--nimcache:" & (work / "cache"),
-                 "--passL:-Wl,--allow-multiple-definition", "--passL:" & rtLib,
                  "--passL:-lm", "-o:" & outBin]
+  when not defined(releaseCompiler):
+    nimCmd.add "--passL:-Wl,--allow-multiple-definition"
+    nimCmd.add "--passL:" & rtLib
   if release: nimCmd.add "-d:release"
   nimCmd.add nimFile
   if verbose and not cached: echo "clonim: " & nimCmd.join(" ")
