@@ -101,10 +101,11 @@ jobs:
             dist/clonim-linux-x86_64.tar.gz
             dist/clonim-linux-x86_64.tar.gz.sha256
           )
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${assets[@]}" --clobber
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber \
+              --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" "${assets[@]}" \
+            gh release create "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --generate-notes \
               --title "$TAG"
