@@ -48,10 +48,14 @@ jobs:
           ref: ${{ steps.release.outputs.tag }}
 
       - name: Install Nim
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: "2.2.12"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl --fail --show-error --silent \
+            https://nim-lang.org/choosenim/init.sh \
+            -o /tmp/choosenim-init.sh
+          CHOOSENIM_CHOOSE_VERSION=2.2.12 sh /tmp/choosenim-init.sh -y
+          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.nimble/bin:$PATH"
+          nim --version
 
       - name: Run test suite
         run: ./run-tests.sh
