@@ -91,24 +91,29 @@ jobs:
           cd dist
           sha256sum "$ARCHIVE_ROOT.tar.gz" > "$ARCHIVE_ROOT.tar.gz.sha256"
 
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          # Rickub runners expose an internal GITHUB_SERVER_URL alias that is
-          # not reachable by `gh` from the job container. Use the public host.
-          export GH_HOST=rickub.com
-          assets=(
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clonim-${{ steps.release.outputs.tag }}-linux-x86_64
+          path: |
             dist/clonim-linux-x86_64.tar.gz
             dist/clonim-linux-x86_64.tar.gz.sha256
-          )
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${assets[@]}" --clobber \
-              --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --generate-notes \
-              --title "$TAG"
-          fi
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish Rickub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.tag }}
+          body: |
+            Linux x86_64 release of clonim.
+
+            The archive contains the compiler, its matched private static
+            runtime archives, runtime interface, and clonim standard library.
+          draft: false
+          prerelease: false
+          files: |
+            dist/clonim-linux-x86_64.tar.gz
+            dist/clonim-linux-x86_64.tar.gz.sha256
+          fail_on_unmatched_files: true
