@@ -93,6 +93,13 @@ proc parseAtom(r: Reader, tok: string): Value =
   if tok == "true": return TrueV
   if tok == "false": return FalseV
   if tok.len > 1 and tok[0] == ':': return mkKeyword(tok[1 .. ^1])
+  # Clojure accepts hexadecimal integer literals, commonly used for bit masks
+  # and crypto constants.
+  let sign = (if tok.len > 0 and tok[0] == '-': -1'i64 else: 1'i64)
+  let digits = (if tok.len > 0 and tok[0] in {'-', '+'}: tok[1 .. ^1] else: tok)
+  if digits.len > 2 and digits[0 .. 1].toLowerAscii == "0x":
+    try: return mkInt(sign * int64(parseHexInt(digits[2 .. ^1])))
+    except ValueError: discard
   # number?
   let body = (if tok[0] in {'-', '+'} and tok.len > 1: tok[1 .. ^1] else: tok)
   if body.len > 0 and body[0] in Digits:
