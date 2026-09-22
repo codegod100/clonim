@@ -67,9 +67,16 @@ proc srcDir(): string =
 
 proc runtimeLib(release: bool): string =
   ## Release archives place the private runtime beside bin/. A source checkout
-  ## builds the same archive into lib/ on first use.
+  ## builds the same archive into lib/ on first use. Nimble installs the
+  ## executable beside its sources rather than under bin/, so keep its archive
+  ## inside the installed package; putting it in pkgs2/lib makes Nim interpret
+  ## that directory as a malformed package on later invocations.
   let libName = (if release: "libclonim_runtime.a" else: "libclonim_runtime_debug.a")
-  let installed = getAppDir().parentDir / "lib" / libName
+  let appDir = getAppDir()
+  let installedRoot =
+    if fileExists(appDir / "app_runtime.nim"): appDir
+    else: appDir.parentDir
+  let installed = installedRoot / "lib" / libName
   let source = srcDir() / "runtime_lib.nim"
   if fileExists(installed):
     if not fileExists(source): return installed
