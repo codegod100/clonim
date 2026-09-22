@@ -154,6 +154,11 @@ Data: nil, bool, int, float, string, keyword, symbol, list, vector, map, set —
 persistent, with structural equality, hashing, and Clojure-shaped printing. Atoms, closures, `comp`,
 `partial`, `juxt`, the usual seq library, `clojure.string/*`.
 
+Agents: `agent`, `send`, `await`, `agent-error`, and `restart-agent`. Agents
+serialize queued state transitions; this initial implementation is cooperative,
+so queued actions run when an agent is dereferenced, awaited, or inspected for
+an error rather than on a background thread.
+
 Lazy seqs: `iterate` `repeat` `repeatedly` `cycle` `doall` `dorun`, and the seq
 library above returns them where Clojure does.
 

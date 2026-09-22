@@ -22,6 +22,7 @@ proc equals*(a, b: Value): bool
 proc hashValue*(v: Value): uint32
 proc prStr*(v: Value): string
 proc toSeq*(v: Value): seq[Value]
+proc call*(f: Value, args: openArray[Value]): Value
 
 # ------------------------------------------------------- persistent vector
 let emptyVNode = VNode(leaf: false, kids: @[])
@@ -297,6 +298,58 @@ proc mkSet*(xs: openArray[Value]): Value = mkSet(@xs)
 proc mkFn*(name: string, f: proc (args: openArray[Value]): Value {.closure.}): Value =
   Value(kind: kFn, obj: Obj(kind: kFn, fn: f, name: name))
 
+proc mkAgent*(state: Value): Value =
+  Value(kind: kAgent, obj: Obj(kind: kAgent,
+    agent: Agent(state: state, queue: @[], failure: NilV, draining: false)))
+
+proc agentOf(v: Value): Agent =
+  if v.kind != kAgent: err("Expected an agent, got " & prStr(v))
+  v.obj.agent
+
+proc drainAgent(a: Agent) =
+  ## A cooperative mailbox: send appends work, while deref and await drain it.
+  ## Actions remain serialized and an exception stops the mailbox.
+  if a.draining or not a.failure.isNil: return
+  a.draining = true
+  try:
+    while a.queue.len > 0 and a.failure.isNil:
+      let action = a.queue[0]
+      a.queue.delete(0)
+      try:
+        a.state = call(action.fn, @[a.state] & action.args)
+      except CljError as e:
+        a.failure = mkStr(e.msg)
+        a.queue.setLen(0)
+  finally:
+    a.draining = false
+
+proc agentSend*(v, f: Value, args: openArray[Value]): Value =
+  let a = agentOf(v)
+  if not a.failure.isNil: err("Agent is failed: " & a.failure.s)
+  a.queue.add AgentAction(fn: f, args: @args)
+  v
+
+proc agentDeref*(v: Value): Value =
+  let a = agentOf(v)
+  drainAgent(a)
+  a.state
+
+proc agentAwait*(vs: openArray[Value]): Value =
+  for v in vs: drainAgent(agentOf(v))
+  NilV
+
+proc agentError*(v: Value): Value =
+  let a = agentOf(v)
+  drainAgent(a)
+  a.failure
+
+proc restartAgent*(v, state: Value): Value =
+  let a = agentOf(v)
+  a.state = state
+  a.failure = NilV
+  a.queue.setLen(0)
+  v
+
 # --------------------------------------------------------------- lazy seqs
 ## A lazy seq is a thunk that, when forced, yields either nil/`kNil` (the end)
 ## or a cons cell whose tail is usually another lazy seq. Forcing is memoized
@@ -474,7 +527,7 @@ proc hashValue*(v: Value): uint32 =
     for e in mapEntries(v.m):
       h = h xor mixHash(hashValue(e.key), hashValue(e.val))
     h
-  of kFn: uint32(hash(cast[int](cast[pointer](v.obj))))
+  of kFn, kAgent: uint32(hash(cast[int](cast[pointer](v.obj))))
 
 # --------------------------------------------------------------- accessors
 proc items*(v: Value): seq[Value] =
@@ -558,7 +611,7 @@ proc equals*(a, b: Value): bool =
     for e in mapEntries(a.m):
       if not equals(e.val, mapGet(b.m, e.key, missing)): return false
     true
-  of kFn: a == b
+  of kFn, kAgent: a == b
   of kList, kVector, kCons, kChunk, kLazy: false  # handled above
 # ---------------------------------------------------------------- printing
 proc escapeStr(s: string): string =
@@ -615,6 +668,7 @@ proc toStr*(v: Value, readable: bool): string =
     for (k, val) in v.pairs: parts.add toStr(k, readable) & " " & toStr(val, readable)
     "{" & parts.join(", ") & "}"
   of kFn: "#<fn " & v.name & ">"
+  of kAgent: "#<agent>"
 
 proc prStr*(v: Value): string = toStr(v, true)
 proc str*(v: Value): string = toStr(v, false)

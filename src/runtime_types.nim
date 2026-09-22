@@ -5,7 +5,18 @@
 type
   Kind* = enum
     kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword, kSymbol,
-    kList, kVector, kMap, kSet, kCons, kChunk, kLazy, kFn
+    kList, kVector, kMap, kSet, kCons, kChunk, kLazy, kFn, kAgent
+
+  AgentAction* = object
+    fn*: Value
+    args*: seq[Value]
+
+  Agent* = ref object
+    ## Actions are queued in send order and run one at a time when observed.
+    state*: Value
+    queue*: seq[AgentAction]
+    failure*: Value
+    draining*: bool
 
   VNode* = ref object
     case leaf*: bool
@@ -72,6 +83,8 @@ type
     of kFn:
       fn*: proc (args: openArray[Value]): Value {.closure.}
       name*: string
+    of kAgent:
+      agent*: Agent
 
   Value* = object
     kind*: Kind
@@ -121,6 +134,7 @@ proc `=destroy`*(x: var ValueObj) =
   of kFn:
     `=destroy`(x.fn)
     `=destroy`(x.name)
+  of kAgent: `=destroy`(x.agent)
   of kCons:
     `=destroy`(x.head)
     if not x.tl.isNil: pendingFree.add x.tl

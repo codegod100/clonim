@@ -194,6 +194,7 @@ proc quoteLit(v: Value): string =
     "mkMap(@[" & parts.join(", ") & "])"
   of kCons, kChunk, kLazy: err("Can't quote a lazy seq")
   of kFn: err("Can't quote a function")
+  of kAgent: err("Can't quote an agent")
 
 proc emptySeqFix(s: string, elemType: string): string =
   ## `@[]` has no inferable element type in Nim; annotate it.
@@ -949,7 +950,7 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
     if hv.len == 0: return ""
     "call(" & hv & ", " &
       (if ids.len == 0: "emptyArgs" else: "[" & ids.join(", ") & "]") & ")"
-  of kFn, kCons, kChunk, kLazy:
+  of kFn, kAgent, kCons, kChunk, kLazy:
     ""
 
 proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
@@ -985,6 +986,8 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
       (if parts.len == 0: "newSeq[(Value, Value)]()" else: "@[" & parts.join(", ") & "]") & ")")
   of kFn:
     err("Can't emit a function literal")
+  of kAgent:
+    err("Can't emit an agent literal")
   of kCons, kChunk, kLazy:
     err("Can't emit a lazy seq literal")
   of kList:

@@ -1,0 +1,16 @@
+(def counter (agent 0))
+(send counter + 2)
+(send counter * 10)
+(println @counter)
+
+(def awaited (agent 3))
+(send awaited + 4)
+(await awaited)
+(println @awaited)
+
+(def broken (agent 1))
+(send broken (fn [_] (throw "boom")))
+(println (agent-error broken))
+(restart-agent broken 7)
+(send broken inc)
+(println @broken)

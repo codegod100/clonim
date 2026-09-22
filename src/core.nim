@@ -1090,7 +1090,16 @@ proc registerCore*() =
       if args.len == 0: return cell
       cell = args[1]
       cell)
-  def "deref", proc (a: openArray[Value]): Value = call(a[0], [])
+  # ---- agents (cooperative, serialized state transitions)
+  def "agent", proc (a: openArray[Value]): Value = mkAgent(a[0])
+  def "send", proc (a: openArray[Value]): Value =
+    if a.len < 2: err("send expects an agent and an action")
+    agentSend(a[0], a[1], a[2 .. ^1])
+  def "await", proc (a: openArray[Value]): Value = agentAwait(a)
+  def "agent-error", proc (a: openArray[Value]): Value = agentError(a[0])
+  def "restart-agent", proc (a: openArray[Value]): Value = restartAgent(a[0], a[1])
+  def "deref", proc (a: openArray[Value]): Value =
+    if a[0].kind == kAgent: agentDeref(a[0]) else: call(a[0], [])
   def "reset!", proc (a: openArray[Value]): Value = call(a[0], [mkKeyword("set"), a[1]])
   def "swap!", proc (a: openArray[Value]): Value =
     let cur = call(a[0], [])
