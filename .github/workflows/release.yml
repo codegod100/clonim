@@ -57,13 +57,13 @@ jobs:
           export PATH="$HOME/.nimble/bin:$PATH"
           nim --version
 
-      - name: Run test suite
-        run: ./run-tests.sh
-
       - name: Install AppImage build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes file
+          sudo apt-get install --yes file libpcre3
+
+      - name: Run test suite
+        run: ./run-tests.sh
 
       - name: Build optimized compiler
         run: |
