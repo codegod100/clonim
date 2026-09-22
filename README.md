@@ -59,7 +59,7 @@ loaded implicitly merely because their source root is available.
 
 This is a static subset: one leading `ns` per file, literal top-level `require`,
 `:as`, explicit `:refer`, and `defn-` privacy. Dynamic namespace operations,
-reload options, `:refer :all`, and arbitrary macro expansion are unsupported.
+reload options, and `:refer :all` are unsupported.
 Missing dependencies, missing vars, and dependency cycles produce errors.
 
 ## Pipeline
@@ -145,6 +145,7 @@ tail another seq still holds simply survives.
 ## What works
 
 `def` `defn` (multi-arity, varargs, docstrings) `fn` (named, self-recursive)
+`defmacro` (including variadic parameters, `&form`, and `&env`)
 `let` `loop`/`recur` `if` `when` `when-not` `if-not` `cond` `when-let` `if-let`
 `do` `and` `or` `->` `->>` `doseq` `dotimes` `try`/`catch`/`finally` `quote`
 
@@ -164,9 +165,9 @@ library above returns them where Clojure does.
 
 ## What doesn't (yet)
 
-- **`defmacro`.** The macro set is fixed and expanded by the compiler. User
-  macros need the compiler to be able to *evaluate* code at compile time —
-  the honest fix is to bootstrap clonim in itself, or embed an interpreter.
+- **Syntax-quote.** User macros can construct forms with `quote` and ordinary
+  core functions such as `list`, `vector`, and `apply`, but automatic
+  namespace qualification through syntax-quote/unquote is not implemented yet.
 - **Chunked seqs.** Lazy seqs are unchunked, so full realization allocates two
   cells per element and runs ~2× slower than the old eager path. 32-element
   chunking is the fix, at the cost of exact demand.

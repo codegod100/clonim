@@ -31,6 +31,12 @@ suite "static namespace resolution":
     check "registerCoreCollections" in destructured
     check "\"nth\"" in destructured
 
+  test "user macros expand before code generation":
+    let expanded = resolveSource(
+      "(defmacro unless [p a b] (list 'if p b a)) (unless false 1 2)", @[])
+    check expanded.len == 1
+    check prStr(expanded[0]) == "(if false 2 1)"
+
   test "regex literals preserve their pattern source":
     let forms = readAll("#\"(?i)^did:[a-z0-9]+:\"")
     check forms.len == 1
@@ -102,8 +108,7 @@ suite "static namespace resolution":
     rejects("(comment (def imaginary 1)) imaginary", "unable to resolve symbol imaginary")
 
   test "macro bindings and threading keep their scopes":
-    checkForms("(defmacro m [x] (list 'quote x &form &env))",
-      "(defmacro user/m [x] (clojure.core/list (quote quote) x &form &env))")
+    check resolveSource("(defmacro m [x] (list 'quote x &form &env))", @[]).len == 0
     checkForms("(let [when +] (-> 1 (when 2)))",
       "(let [when clojure.core/+] ((do when) 1 2))")
 
@@ -155,6 +160,10 @@ suite "namespace source loader":
       (ns other (:require sample.lib-one))
       (def result sample.lib-one/value)
     """)
+    writeFile(root / "sample" / "macros.clj", """
+      (ns sample.macros)
+      (defmacro unless [p a b] (list 'if p b a))
+    """)
   teardown:
     removeDir(root)
 
@@ -167,6 +176,13 @@ suite "namespace source loader":
     check forms.len == 5
     check prStr(forms[^1]) == "[sample.lib-one/value sample.lib-one/value sample.lib-one/value]"
     check prStr(forms[2]) == "(defn sample.lib-one/public [] (sample.lib-one/hidden))"
+
+  test "macros expand through aliases and refers":
+    checkForms("""
+      (ns app (:require [sample.macros :as m :refer [unless]]))
+      (m/unless false 1 2)
+      (unless true 3 4)
+    """, "(if false 2 1) (if true 4 3)", @[root])
 
   test "plain require imports no unqualified names or aliases":
     rejects("(require 'sample.lib-one) value", "unable to resolve symbol value", @[root])

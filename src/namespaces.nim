@@ -10,6 +10,9 @@ import std/[os, tables, sets, strutils]
 import runtime, reader, core
 
 type
+  MacroDef = object
+    params: Value
+    body: seq[Value]
   Namespace = ref object
     name: string
     aliases, refers: Table[string, string]
@@ -20,6 +23,7 @@ type
     spaces: Table[string, Namespace]
     active: seq[string]
     loaded: HashSet[string]
+    macros: Table[string, MacroDef]
     output: seq[Value]
     gensym: int
 
@@ -156,6 +160,110 @@ proc define(ns: Namespace, v: Value, private = false): Value =
 
 proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value
 
+proc macroKey(r: Resolver, ns: Namespace, raw: string): string =
+  let slash = raw.find('/')
+  if slash > 0:
+    let target = ns.aliases.getOrDefault(raw[0 ..< slash], raw[0 ..< slash])
+    return target & raw[slash .. ^1]
+  if raw in ns.defs: return ns.name & "/" & raw
+  if ns.refers.hasKey(raw): return ns.refers[raw]
+
+proc bindMacroParams(params: Value, args: seq[Value]): Table[string, Value] =
+  if params.kind != kVector: fail("macro parameters must be a vector")
+  result = initTable[string, Value]()
+  var pi = 0
+  var ai = 0
+  while pi < params.items.len:
+    let p = params.items[pi]
+    if p.kind == kSymbol and p.s == "&":
+      if pi + 1 >= params.items.len or params.items[pi + 1].kind != kSymbol:
+        fail("macro & must be followed by a symbol")
+      result[params.items[pi + 1].s] =
+        (if ai < args.len: mkList(args[ai .. ^1]) else: NilV)
+      return
+    if p.kind != kSymbol: fail("macro parameters must be symbols")
+    if ai >= args.len: fail("not enough arguments passed to macro")
+    result[p.s] = args[ai]
+    inc pi
+    inc ai
+  if ai != args.len: fail("too many arguments passed to macro")
+
+proc evalMacro(v: Value, env: Table[string, Value]): Value
+
+proc evalMacroBody(body: seq[Value], env: Table[string, Value]): Value =
+  result = NilV
+  for form in body: result = evalMacro(form, env)
+
+proc evalMacro(v: Value, env: Table[string, Value]): Value =
+  case v.kind
+  of kSymbol:
+    if env.hasKey(v.s): return env[v.s]
+    if hasVar(v.s): return getVar(v.s)
+    fail("macro evaluation cannot resolve " & v.s)
+  of kVector:
+    var xs: seq[Value]
+    for x in v.items: xs.add evalMacro(x, env)
+    return mkVector(xs)
+  of kMap:
+    var ps: seq[(Value, Value)]
+    for (k, value) in v.pairs: ps.add (evalMacro(k, env), evalMacro(value, env))
+    return mkMap(ps)
+  of kSet:
+    var xs: seq[Value]
+    for x in v.items: xs.add evalMacro(x, env)
+    return mkSet(xs)
+  of kList: discard
+  else: return v
+  let xs = v.items
+  if xs.len == 0: return v
+  let head = if xs[0].kind == kSymbol: xs[0].s else: ""
+  case head
+  of "quote":
+    if xs.len != 2: fail("quote in macro body expects one argument")
+    return xs[1]
+  of "if":
+    if xs.len notin 3 .. 4: fail("if in macro body expects two or three arguments")
+    if truthy(evalMacro(xs[1], env)): return evalMacro(xs[2], env)
+    return (if xs.len == 4: evalMacro(xs[3], env) else: NilV)
+  of "do": return evalMacroBody(xs[1 .. ^1], env)
+  of "let", "let*":
+    if xs.len < 3 or xs[1].kind != kVector or xs[1].items.len mod 2 != 0:
+      fail("let in macro body requires paired bindings")
+    var scope = env
+    var i = 0
+    while i < xs[1].items.len:
+      let name = xs[1].items[i]
+      if name.kind != kSymbol: fail("macro let bindings must be symbols")
+      scope[name.s] = evalMacro(xs[1].items[i + 1], scope)
+      i += 2
+    return evalMacroBody(xs[2 .. ^1], scope)
+  of "fn", "fn*":
+    if xs.len < 3 or xs[1].kind != kVector:
+      fail("fn in macro body requires a parameter vector")
+    let params = xs[1]
+    let body = xs[2 .. ^1]
+    let captured = env
+    return mkFn("macro-fn", proc (args: openArray[Value]): Value =
+      var scope = captured
+      let bound = bindMacroParams(params, @args)
+      for name, value in bound: scope[name] = value
+      evalMacroBody(body, scope))
+  else: discard
+  let f = evalMacro(xs[0], env)
+  var args: seq[Value]
+  for x in xs[1 .. ^1]: args.add evalMacro(x, env)
+  call(f, args)
+
+proc expandMacro(r: Resolver, ns: Namespace, form: Value,
+                 locals: HashSet[string]): (bool, Value) =
+  let key = r.macroKey(ns, form.items[0].s)
+  if key.len == 0 or not r.macros.hasKey(key): return (false, NilV)
+  let m = r.macros[key]
+  var env = bindMacroParams(m.params, form.items[1 .. ^1])
+  env["&form"] = form
+  env["&env"] = mkMap(@[])
+  result = (true, evalMacroBody(m.body, env))
+
 proc bindNames(v: Value, locals: var HashSet[string]) =
   case v.kind
   of kSymbol:
@@ -234,6 +342,9 @@ proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value 
   else: return v
   var xs = v.items
   if xs.len == 0: return v
+  if xs[0].kind == kSymbol and xs[0].s notin locals:
+    let (isMacro, expanded) = r.expandMacro(ns, v, locals)
+    if isMacro: return r.walk(ns, expanded, locals)
   let h = ns.syntaxHead(v, locals)
   if h in ["quote", "comment"]:
     xs[0] = mkSymbol(h)
@@ -249,16 +360,29 @@ proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value 
       scope.incl simple(xs[1], "function name")
       start = 2
     return mkList(xs[0 ..< start] & r.fnTail(ns, xs[start .. ^1], scope))
-  of "defn", "defn-", "defmacro":
+  of "defmacro":
+    if xs.len < 4: fail("defmacro requires a name, parameters, and body")
+    xs[1] = ns.define(xs[1])
+    var start = 2
+    if xs[start].kind == kStr: inc start
+    if start < xs.len and xs[start].kind == kMap: inc start
+    if start >= xs.len or xs[start].kind != kVector:
+      fail("defmacro requires a parameter vector")
+    var scope = locals
+    bindNames(xs[start], scope)
+    scope.incl "&form"
+    scope.incl "&env"
+    var body: seq[Value]
+    for i in start + 1 ..< xs.len: body.add r.walk(ns, xs[i], scope)
+    r.macros[xs[1].s] = MacroDef(params: xs[start], body: body)
+    return mkList(@[mkSymbol("defmacro"), xs[1]])
+  of "defn", "defn-":
     if xs.len < 3: fail(h & " requires a name and parameters")
     xs[1] = ns.define(xs[1], h == "defn-")
     var start = 2
     if start < xs.len and xs[start].kind == kStr: inc start
     if start < xs.len and xs[start].kind == kMap: inc start
     var scope = locals
-    if h == "defmacro":
-      scope.incl "&form"
-      scope.incl "&env"
     return mkList(xs[0 ..< start] & r.fnTail(ns, xs[start .. ^1], scope))
   of "def", "declare":
     if xs.len < 2: fail(h & " requires a name")
@@ -480,7 +604,8 @@ proc process(r: Resolver, forms: seq[Value], expected = "") =
             fail("dynamic require is unsupported; quote each libspec")
           r.requireSpec(ns, arg.items[1])
       else:
-        r.output.add r.walk(ns, f, initHashSet[string]())
+        let walked = r.walk(ns, f, initHashSet[string]())
+        if headName(walked) != "defmacro": r.output.add walked
     r.loaded.incl name
   finally:
     discard r.active.pop()
@@ -495,6 +620,14 @@ proc resolveSource*(src: string, sourceRoots: seq[string]): seq[Value] =
   ## require, except for the current namespace and implicit clojure.core.
   ## Unknown and externally private vars are rejected during analysis.
   let r = Resolver(roots: sourceRoots, cores: registeredCoreNames(),
-                   hosts: registeredHostNames())
-  r.process(readAll(src))
-  r.output
+                   hosts: registeredHostNames(),
+                   macros: initTable[string, MacroDef]())
+  let saved = globals
+  globals = initTable[string, VarCell]()
+  try:
+    registerCore()
+    registerNamespaceCore()
+    r.process(readAll(src))
+    result = r.output
+  finally:
+    globals = saved
