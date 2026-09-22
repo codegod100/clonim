@@ -10,6 +10,20 @@ proc mkFn*(name: string,
 {.push cdecl.}
 proc initClonimRuntime*() {.importc: "ClonimRuntimeNimMain".}
 proc registerCore*() {.importc: "clonim_register_core".}
+proc registerCoreSelected*(names: openArray[string])
+  {.importc: "clonim_register_core_selected".}
+proc registerCoreArithmetic*(names: openArray[string])
+  {.importc: "clonim_register_core_arithmetic".}
+proc registerCorePredicates*(names: openArray[string])
+  {.importc: "clonim_register_core_predicates".}
+proc registerCoreStringsIo*(names: openArray[string])
+  {.importc: "clonim_register_core_strings_io".}
+proc registerCoreCollections*(names: openArray[string])
+  {.importc: "clonim_register_core_collections".}
+proc registerCoreHigherOrder*(names: openArray[string])
+  {.importc: "clonim_register_core_higher_order".}
+proc registerCoreStateHost*(names: openArray[string])
+  {.importc: "clonim_register_core_state_host".}
 proc registerNamespaceCore*() {.importc: "clonim_register_namespace_core".}
 
 proc err*(msg: string) {.noreturn, importc: "clonim_err".}

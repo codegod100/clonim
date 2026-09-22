@@ -1,6 +1,10 @@
 ## clonim core — clojure.core builtins, registered into the global var table.
-import std/[strutils, math, times, random, re, os, httpclient, sequtils]
+import std/[strutils, math, times, random, re, os, httpclient, sequtils, sets,
+            tables]
 import runtime
+
+var selectedCore: HashSet[string]
+var selectingCore = false
 
 proc num(v: Value): float64 =
   case v.kind
@@ -336,10 +340,12 @@ proc lazyConcat(colls: seq[Value], i: int, c: Cursor): Value =
     mkCons(x, lazyConcat(colls, k, cc)))
 
 proc def(name: string, f: proc (args: openArray[Value]): Value {.closure.}) =
+  if selectingCore and name notin selectedCore: return
   setVar(name, mkFn(name, f))
 
 proc def(name: string, v: Value) =
   ## A var whose value is data rather than a function, such as *out*.
+  if selectingCore and name notin selectedCore: return
   setVar(name, v)
 
 # ----------------------------------------------------------------- fusion
@@ -497,7 +503,7 @@ proc currentOut(): File =
   else:
     stdout
 
-proc registerCore*() =
+proc registerCoreArithmetic*() =
   # ---- arithmetic
   def "+", proc (a: openArray[Value]): Value =
     arith("+", a, 0, proc (x, y: int64): int64 = x + y, proc (x, y: float64): float64 = x + y)
@@ -597,6 +603,7 @@ proc registerCore*() =
     try: mkFloat(parseFloat(a[0].s.strip))
     except ValueError: err("Not a number: " & a[0].s)
 
+proc registerCorePredicates*() =
   # ---- comparison / predicates
   def "=", proc (a: openArray[Value]): Value =
     for i in 0 ..< a.len - 1:
@@ -642,6 +649,7 @@ proc registerCore*() =
       mkBool(a[1].kind == kInt and a[1].i >= 0 and a[1].i < c.vec.cnt)
     else: FalseV
 
+proc registerCoreStringsIo*() =
   # ---- strings / IO
   def "str", proc (a: openArray[Value]): Value =
     var s = ""
@@ -797,6 +805,7 @@ proc registerCore*() =
   # Host primitive used by the source-level stdlib's now-ms wrapper.
   def "*epoch-time-ms*", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))
 
+proc registerCoreCollections*() =
   # ---- collections
   def "list", proc (a: openArray[Value]): Value = mkList(a)
   def "vector", proc (a: openArray[Value]): Value = mkVector(a)
@@ -998,6 +1007,7 @@ proc registerCore*() =
       for x in elems(call(a[0], args)): r.add x
     mkList(r)
 
+proc registerCoreHigherOrder*() =
   # ---- higher order
   def "apply", proc (a: openArray[Value]): Value =
     var callArgs: seq[Value] = @[]
@@ -1081,6 +1091,7 @@ proc registerCore*() =
     let v = a[0]
     mkFn("constantly", proc (args: openArray[Value]): Value = v)
 
+proc registerCoreStateHost*() =
   # ---- atoms (mutable boxes, modelled as a 1-slot vector)
   def "atom", proc (a: openArray[Value]): Value =
     var cell = a[0]
@@ -1151,3 +1162,69 @@ proc registerCore*() =
   def "throw", proc (a: openArray[Value]): Value = err(str(a[0]))
   def "ex-info", proc (a: openArray[Value]): Value = mkStr(str(a[0]))
   def "time-ms", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))
+
+proc aliasSelectedCore(names: openArray[string]) =
+  for name in names:
+    if (name == "/" or '/' notin name) and hasVar(name):
+      globals["clojure.core/" & name] = varCell(name)
+
+template registerSelected(names: openArray[string], body: untyped) =
+  selectedCore = initHashSet[string]()
+  for name in names: selectedCore.incl name
+  selectingCore = true
+  try:
+    body
+  finally:
+    selectingCore = false
+  aliasSelectedCore(names)
+
+proc registerCoreArithmeticSelected*(names: openArray[string]) =
+  registerSelected(names): registerCoreArithmetic()
+proc registerCorePredicatesSelected*(names: openArray[string]) =
+  registerSelected(names): registerCorePredicates()
+proc registerCoreStringsIoSelected*(names: openArray[string]) =
+  registerSelected(names): registerCoreStringsIo()
+proc registerCoreCollectionsSelected*(names: openArray[string]) =
+  registerSelected(names): registerCoreCollections()
+proc registerCoreHigherOrderSelected*(names: openArray[string]) =
+  registerSelected(names): registerCoreHigherOrder()
+proc registerCoreStateHostSelected*(names: openArray[string]) =
+  registerSelected(names): registerCoreStateHost()
+
+proc registerCore*() =
+  registerCoreArithmetic()
+  registerCorePredicates()
+  registerCoreStringsIo()
+  registerCoreCollections()
+  registerCoreHigherOrder()
+  registerCoreStateHost()
+
+proc registerCoreSelected*(names: openArray[string]) =
+  ## Register only the statically reachable core vars in a generated program.
+  ## Qualified clojure.core names share their unqualified cell, preserving the
+  ## rebinding semantics of the full registry.
+  selectedCore = initHashSet[string]()
+  for name in names: selectedCore.incl name
+  selectingCore = true
+  try:
+    registerCore()
+  finally:
+    selectingCore = false
+  aliasSelectedCore(names)
+
+proc coreRegistrationGroups*(names: openArray[string]): HashSet[int] =
+  ## Used by the compiler process to discover which independently linked core
+  ## registration families contain the resolved vars in a program.
+  let saved = globals
+  for group in 0 .. 5:
+    globals = initTable[string, VarCell]()
+    case group
+    of 0: registerCoreArithmetic()
+    of 1: registerCorePredicates()
+    of 2: registerCoreStringsIo()
+    of 3: registerCoreCollections()
+    of 4: registerCoreHigherOrder()
+    else: registerCoreStateHost()
+    for name in names:
+      if hasVar(name): result.incl group
+  globals = saved

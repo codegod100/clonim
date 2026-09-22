@@ -3,8 +3,8 @@
 ## Shape borrowed from jank: read to data, analyze into a small set of core
 ## special forms (everything else is expanded), then emit host-language code
 ## and let the host compiler do register allocation, inlining and codegen.
-import std/[tables, strutils, sets]
-import runtime, namespaces
+import std/[tables, strutils, sets, algorithm]
+import runtime, namespaces, core
 
 type
   ## A fn whose arity is known at the call site, so it can be reached as a
@@ -569,7 +569,7 @@ proc bindPattern(target: Value, v: string, lenv: Env, c: Ctx) =
         j += 2
         continue
       let id = c.gensym("lnth")
-      c.line("var " & id & ": Value = call(getVar(\"clojure.core/nth\"), [" & v & ", mkInt(" &
+      c.line("var " & id & ": Value = call(cellGet(" & c.cellFor("clojure.core/nth") & "), [" & v & ", mkInt(" &
              $idx & "), NilV])")
       bindPattern(p, id, lenv, c)
       inc idx; inc j
@@ -584,7 +584,7 @@ proc bindPattern(target: Value, v: string, lenv: Env, c: Ctx) =
       if defaults.kind == kMap:
         for (dk, dv) in defaults.pairs:
           if dk.kind == kSymbol and dk.s == nm: default = genExpr(dv, lenv, c)
-      c.line("var " & id & ": Value = call(getVar(\"clojure.core/get\"), [" & v &
+      c.line("var " & id & ": Value = call(cellGet(" & c.cellFor("clojure.core/get") & "), [" & v &
              ", mkKeyword(" & nimStr(key) & "), " & default & "])")
       lenv.locals[nm] = id
     for (k, valForm) in target.pairs:
@@ -602,7 +602,7 @@ proc bindPattern(target: Value, v: string, lenv: Env, c: Ctx) =
       else:
         let id = c.gensym("l" & mangle(symName(k)))
         let kv = genExpr(valForm, lenv, c)
-        c.line("var " & id & ": Value = call(getVar(\"clojure.core/get\"), [" & v & ", " & kv & "])")
+        c.line("var " & id & ": Value = call(cellGet(" & c.cellFor("clojure.core/get") & "), [" & v & ", " & kv & "])")
         lenv.locals[symName(k)] = id
   else:
     err("Unsupported binding form: " & prStr(target))
@@ -1321,7 +1321,28 @@ proc compileForms*(forms: seq[Value]): string =
     c.push
     c.line("discard call(getVar(" & nimStr(mainVar) & "), clonimArgv)")
     c.pop
-  var src = preamble & "  initClonimRuntime()\n  registerCore()\n  registerNamespaceCore()\n" & c.prelude.join("\n") & "\n" &
+  var neededCore = initHashSet[string]()
+  neededCore.incl "*command-line-args*"
+  for name, _ in c.cells:
+    if name.startsWith("clojure.core/"):
+      neededCore.incl name[13 .. ^1]
+    elif '/' in name:
+      neededCore.incl name
+  var neededNames: seq[string] = @[]
+  for name in neededCore: neededNames.add name
+  neededNames.sort()
+  var needed: seq[string] = @[]
+  for name in neededNames: needed.add nimStr(name)
+  let manifest = "[" & needed.join(", ") & "]"
+  let groups = coreRegistrationGroups(neededNames)
+  const groupProcs = ["registerCoreArithmetic", "registerCorePredicates",
+    "registerCoreStringsIo", "registerCoreCollections",
+    "registerCoreHigherOrder", "registerCoreStateHost"]
+  var registration = ""
+  for group in 0 ..< groupProcs.len:
+    if group in groups:
+      registration.add "  " & groupProcs[group] & "(" & manifest & ")\n"
+  var src = preamble & "  initClonimRuntime()\n" & registration & c.prelude.join("\n") & "\n" &
             c.body.join("\n") & "\n\n"
   src &= """
 when isMainModule:

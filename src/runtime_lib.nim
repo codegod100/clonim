@@ -8,6 +8,20 @@ proc clonim_mk_fn(name: string,
 
 {.push cdecl, exportc.}
 proc clonim_register_core() = registerCore()
+proc clonim_register_core_selected(names: openArray[string]) =
+  registerCoreSelected(names)
+proc clonim_register_core_arithmetic(names: openArray[string]) =
+  registerCoreArithmeticSelected(names)
+proc clonim_register_core_predicates(names: openArray[string]) =
+  registerCorePredicatesSelected(names)
+proc clonim_register_core_strings_io(names: openArray[string]) =
+  registerCoreStringsIoSelected(names)
+proc clonim_register_core_collections(names: openArray[string]) =
+  registerCoreCollectionsSelected(names)
+proc clonim_register_core_higher_order(names: openArray[string]) =
+  registerCoreHigherOrderSelected(names)
+proc clonim_register_core_state_host(names: openArray[string]) =
+  registerCoreStateHostSelected(names)
 proc clonim_register_namespace_core() = registerNamespaceCore()
 proc clonim_err(msg: string) {.noreturn.} = err(msg)
 proc clonim_var_cell(name: string): VarCell = varCell(name)

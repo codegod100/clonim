@@ -1,6 +1,6 @@
 ## Run with: nim r --hints:off --path:src tests/test_namespaces.nim
 import std/[unittest, os, tempfiles, strutils, tables]
-import runtime, reader, core, namespaces
+import runtime, reader, core, namespaces, compiler
 
 proc checkForms(src, expected: string, roots: seq[string] = @[]) =
   let actual = resolveSource(src, roots)
@@ -22,6 +22,15 @@ proc rejects(src, message: string, roots: seq[string] = @[]) =
   check rejected
 
 suite "static namespace resolution":
+  test "generated programs register only reachable core families":
+    let hello = compileSource("(println \"hi\")")
+    check "registerCoreStringsIo" in hello
+    check "registerCoreArithmetic" notin hello
+    check "registerCore()" notin hello
+    let destructured = compileSource("(let [[x] [1]] x)")
+    check "registerCoreCollections" in destructured
+    check "\"nth\"" in destructured
+
   test "regex literals preserve their pattern source":
     let forms = readAll("#\"(?i)^did:[a-z0-9]+:\"")
     check forms.len == 1
