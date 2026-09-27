@@ -1,7 +1,7 @@
 ## clonim core — clojure.core builtins, registered into the global var table.
-import std/[strutils, math, times, random, re, os, httpclient, sequtils, sets,
+import std/[algorithm, strutils, math, times, random, re, os, httpclient, sequtils, sets,
             tables]
-import runtime
+import runtime, reader
 
 var selectedCore: HashSet[string]
 var selectingCore = false
@@ -142,6 +142,9 @@ proc dec1g*(c: VarCell, k: Value, a: Value): Value {.inline.} =
 proc getIn(coll, k, dflt: Value): Value =
   if coll.isNil or coll.kind == kNil: return dflt
   case coll.kind
+  of kObject:
+    if objMethod(coll, "valAt").isNil: dflt
+    else: objCall(coll, "valAt", [k, dflt])
   of kMap: mapGet(coll.m, k, dflt)
   of kSet: mapGet(coll.m, k, dflt)
   of kVector:
@@ -647,6 +650,9 @@ proc registerCorePredicates*() =
     of kMap, kSet: mkBool(mapContains(c.m, a[1]))
     of kVector:
       mkBool(a[1].kind == kInt and a[1].i >= 0 and a[1].i < c.vec.cnt)
+    of kObject:
+      if objMethod(c, "containsKey").isNil: FalseV
+      else: mkBool(truthy(objCall(c, "containsKey", [a[1]])))
     else: FalseV
 
 proc registerCoreStringsIo*() =
@@ -689,10 +695,25 @@ proc registerCoreStringsIo*() =
     writeOut(currentOut(), "\n"); NilV
   def "name", proc (a: openArray[Value]): Value =
     case a[0].kind
-    of kKeyword, kSymbol, kStr: mkStr(a[0].s)
+    of kStr: a[0]
+    of kKeyword, kSymbol:
+      let s = a[0].s
+      let i = s.find('/')
+      mkStr(if i > 0 and s != "/": s[i + 1 .. ^1] else: s)
     else: err("name expects keyword/symbol/string")
-  def "keyword", proc (a: openArray[Value]): Value = mkKeyword(str(a[0]))
-  def "symbol", proc (a: openArray[Value]): Value = mkSymbol(str(a[0]))
+  def "keyword", proc (a: openArray[Value]): Value =
+    if a.len > 1:
+      return (if a[0].kind == kNil: mkKeyword(str(a[1]))
+              else: mkKeyword(str(a[0]) & "/" & str(a[1])))
+    case a[0].kind
+    of kKeyword: a[0]
+    of kNil: NilV
+    else: mkKeyword(str(a[0]))
+  def "symbol", proc (a: openArray[Value]): Value =
+    if a.len > 1:
+      return (if a[0].kind == kNil: mkSymbol(str(a[1]))
+              else: mkSymbol(str(a[0]) & "/" & str(a[1])))
+    (if a[0].kind == kKeyword: mkSymbol(a[0].s) else: mkSymbol(str(a[0])))
   def "subs", proc (a: openArray[Value]): Value =
     let s = sOf(a[0])
     let st = int(intOf(a[1]))
@@ -805,7 +826,484 @@ proc registerCoreStringsIo*() =
   # Host primitive used by the source-level stdlib's now-ms wrapper.
   def "*epoch-time-ms*", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))
 
+# ------------------------------------------------------------- comparison
+proc splitName(s: string): (string, string, bool) =
+  ## (namespace, name, has-namespace) for a keyword or symbol's text.
+  let i = s.find('/')
+  if i > 0 and s != "/": (s[0 ..< i], s[i + 1 .. ^1], true)
+  else: ("", s, false)
+
+proc cmpStr(a, b: string): int =
+  ## java.lang.String#compareTo: the first differing char, else the length.
+  for i in 0 ..< min(a.len, b.len):
+    if a[i] != b[i]: return int(a[i]) - int(b[i])
+  a.len - b.len
+
+proc uuidHalves(s: string): (int64, int64) =
+  let hex = s.replace("-", "")
+  (cast[int64](fromHex[uint64](hex[0 .. 15])), cast[int64](fromHex[uint64](hex[16 .. 31])))
+
+proc compareValues*(a, b: Value): int =
+  ## clojure.core/compare: a total order within each comparable type.
+  if a.kind == kNil: return (if b.kind == kNil: 0 else: -1)
+  if b.kind == kNil: return 1
+  if a.kind in {kInt, kFloat} and b.kind in {kInt, kFloat}:
+    if a.kind == kInt and b.kind == kInt: return cmp(a.i, b.i)
+    return cmp(num(a), num(b))
+  if a.kind != b.kind:
+    err("Cannot compare " & prStr(a) & " to " & prStr(b))
+  case a.kind
+  of kBool: cmp(int(a.b), int(b.b))
+  of kChar: int(a.i - b.i)
+  of kInst: cmp(a.i, b.i)
+  of kStr: cmpStr(a.s, b.s)
+  of kUuid:
+    let (am, al) = uuidHalves(a.s)
+    let (bm, bl) = uuidHalves(b.s)
+    (if am != bm: cmp(am, bm) else: cmp(al, bl))
+  of kKeyword, kSymbol:
+    let (an, aname, ahas) = splitName(a.s)
+    let (bn, bname, bhas) = splitName(b.s)
+    if ahas != bhas: return (if ahas: 1 else: -1)
+    if ahas:
+      let c = cmpStr(an, bn)
+      if c != 0: return c
+    cmpStr(aname, bname)
+  of kVector:
+    if a.vec.cnt != b.vec.cnt: return cmp(a.vec.cnt, b.vec.cnt)
+    for i in 0 ..< a.vec.cnt:
+      let c = compareValues(vecNth(a.vec, i), vecNth(b.vec, i))
+      if c != 0: return c
+    0
+  of kObject:
+    let m = objMethod(a, "compareTo")
+    if m.isNil: err("Cannot compare " & prStr(a))
+    int(intOf(objCall(a, "compareTo", [b])))
+  else: err("Cannot compare " & prStr(a) & " to " & prStr(b))
+
+proc comparatorProc(f: Value): proc (a, b: Value): int =
+  ## A Clojure comparator: a fn returning a number, or a boolean "less than"
+  ## predicate, which is how Clojure lets (sort > xs) work.
+  if f.isNil or f.kind == kNil: return compareValues
+  result = proc (a, b: Value): int =
+    let r = call(f, [a, b])
+    case r.kind
+    of kBool:
+      if r.b: -1
+      elif truthy(call(f, [b, a])): 1
+      else: 0
+    of kInt: int(clamp(r.i, -1, 1))
+    of kFloat: (if r.f < 0: -1 elif r.f > 0: 1 else: 0)
+    else: err("Comparator must return a number or boolean")
+
+proc sortedList(xs: seq[Value], cmpF: proc (a, b: Value): int): Value =
+  var s = xs
+  s.sort(cmpF)            # merge sort: stable, O(n log n)
+  mkList(s)
+
+# ---------------------------------------------------------- nested update
+proc assocInImpl(m: Value, ks: seq[Value], i: int, v: Value): Value =
+  if i == ks.len - 1: return assocOne(m, ks[i], v)
+  assocOne(m, ks[i], assocInImpl(getIn(m, ks[i], NilV), ks, i + 1, v))
+
+proc updateInImpl(m: Value, ks: seq[Value], i: int, f: Value,
+                  extra: seq[Value]): Value =
+  if i == ks.len - 1:
+    return assocOne(m, ks[i], call(f, @[getIn(m, ks[i], NilV)] & extra))
+  assocOne(m, ks[i], updateInImpl(getIn(m, ks[i], NilV), ks, i + 1, f, extra))
+
+proc flattenInto(v: Value, acc: var seq[Value]) =
+  for x in elems(v):
+    if x.kind in {kList, kVector, kCons, kChunk, kLazy}: flattenInto(x, acc)
+    else: acc.add x
+
+proc setOf(v: Value): PMap =
+  if v.isNil or v.kind == kNil: return emptyPMap()
+  if v.kind == kSet: return v.m
+  var m = emptyPMap()
+  for x in elems(v): m = mapAssoc(m, x, x)
+  m
+
+proc exInfo(msg: string, data: Value): Value =
+  let dataV = data
+  let msgV = mkStr(msg)
+  var methods = emptyPMap()
+  methods = mapAssoc(methods, mkStr("getMessage"),
+    mkFn("getMessage", proc (a: openArray[Value]): Value = msgV))
+  methods = mapAssoc(methods, mkStr("getData"),
+    mkFn("getData", proc (a: openArray[Value]): Value = dataV))
+  methods = mapAssoc(methods, mkStr("getCause"),
+    mkFn("getCause", proc (a: openArray[Value]): Value = NilV))
+  methods = mapAssoc(methods, mkStr("toString"),
+    mkFn("toString", proc (a: openArray[Value]): Value =
+      mkStr("clojure.lang.ExceptionInfo: " & msg & " " & prStr(dataV))))
+  mkObject("clojure.lang.ExceptionInfo", mkMapOf(methods))
+
+proc randomUuidStr(): string =
+  var bytes: array[16, int]
+  for i in 0 ..< 16: bytes[i] = rand(255)
+  bytes[6] = (bytes[6] and 0x0f) or 0x40
+  bytes[8] = (bytes[8] and 0x3f) or 0x80
+  for i, b in bytes:
+    if i in [4, 6, 8, 10]: result.add '-'
+    result.add toHex(b, 2).toLowerAscii
+
+proc ednTagFn(opts: Value): TagFn =
+  if opts.kind != kMap: return nil
+  let readers = mapGet(opts.m, mkKeyword("readers"), NilV)
+  let dflt = mapGet(opts.m, mkKeyword("default"), NilV)
+  result = proc (tag: string, form: Value): Value =
+    if readers.kind == kMap:
+      let f = mapGet(readers.m, mkSymbol(tag), NilV)
+      if not f.isNil and f.kind != kNil: return call(f, [form])
+    if not dflt.isNil and dflt.kind != kNil:
+      return call(dflt, [mkSymbol(tag), form])
+    err("No reader function for tag " & tag)
+
+proc registerCoreData() =
+  def "compare", proc (a: openArray[Value]): Value =
+    mkInt(compareValues(a[0], a[1]))
+  def "sort", proc (a: openArray[Value]): Value =
+    sortedList(toSeq(a[^1]), comparatorProc(if a.len > 1: a[0] else: NilV))
+  def "sort-by", proc (a: openArray[Value]): Value =
+    let kf = a[0]
+    let c = comparatorProc(if a.len > 2: a[1] else: NilV)
+    sortedList(toSeq(a[^1]), proc (x, y: Value): int =
+      c(call(kf, [x]), call(kf, [y])))
+  def "distinct", proc (a: openArray[Value]): Value =
+    var seen = emptyPMap()
+    var r: seq[Value] = @[]
+    for x in elems(a[0]):
+      if not mapContains(seen, x):
+        seen = mapAssoc(seen, x, x)
+        r.add x
+    mkList(r)
+  def "keys", proc (a: openArray[Value]): Value =
+    var r: seq[Value] = @[]
+    if a[0].kind == kMap:
+      for e in mapEntries(a[0].m): r.add e.key
+    else:
+      for e in elems(a[0]): r.add seqFirst(e)
+    (if r.len == 0: NilV else: mkList(r))
+  def "vals", proc (a: openArray[Value]): Value =
+    var r: seq[Value] = @[]
+    if a[0].kind == kMap:
+      for e in mapEntries(a[0].m): r.add e.val
+    else:
+      for e in elems(a[0]): r.add seqFirst(seqRest(e))
+    (if r.len == 0: NilV else: mkList(r))
+  def "merge", proc (a: openArray[Value]): Value =
+    result = NilV
+    for m in a:
+      if m.kind == kNil: continue
+      result = (if result.kind == kNil: m else: conjOne(result, m))
+  def "merge-with", proc (a: openArray[Value]): Value =
+    let f = a[0]
+    result = NilV
+    for i in 1 ..< a.len:
+      let m = a[i]
+      if m.kind == kNil: continue
+      if result.kind == kNil: result = m; continue
+      var acc = result.m
+      for e in mapEntries(m.m):
+        if mapContains(acc, e.key):
+          acc = mapAssoc(acc, e.key, call(f, [mapGet(acc, e.key, NilV), e.val]))
+        else: acc = mapAssoc(acc, e.key, e.val)
+      result = mkMapOf(acc)
+  def "zipmap", proc (a: openArray[Value]): Value =
+    var m = emptyPMap()
+    var ck = cursor(a[0])
+    var cv = cursor(a[1])
+    while hasNext(ck) and hasNext(cv):
+      let k = next(ck)
+      m = mapAssoc(m, k, next(cv))
+    mkMapOf(m)
+  def "select-keys", proc (a: openArray[Value]): Value =
+    var m = emptyPMap()
+    if a[0].kind == kMap:
+      for k in elems(a[1]):
+        if mapContains(a[0].m, k): m = mapAssoc(m, k, mapGet(a[0].m, k, NilV))
+    mkMapOf(m)
+  def "disj", proc (a: openArray[Value]): Value =
+    if a[0].kind == kNil: return NilV
+    var m = a[0].m
+    for i in 1 ..< a.len: m = mapDissoc(m, a[i])
+    mkSetOf(m)
+  def "dissoc", proc (a: openArray[Value]): Value =
+    if a[0].kind == kNil: return NilV
+    var m = a[0].m
+    for i in 1 ..< a.len: m = mapDissoc(m, a[i])
+    mkMapOf(m)
+  def "find", proc (a: openArray[Value]): Value =
+    if a[0].kind == kMap and mapContains(a[0].m, a[1]):
+      mkVector(@[a[1], mapGet(a[0].m, a[1], NilV)])
+    else: NilV
+  def "key", proc (a: openArray[Value]): Value = seqFirst(a[0])
+  def "val", proc (a: openArray[Value]): Value = seqFirst(seqRest(a[0]))
+  def "not-empty", proc (a: openArray[Value]): Value =
+    (if seqIsEmpty(a[0]): NilV else: a[0])
+  def "empty", proc (a: openArray[Value]): Value =
+    case a[0].kind
+    of kMap: mkMapOf(emptyPMap())
+    of kSet: mkSetOf(emptyPMap())
+    of kVector: mkVector(newSeq[Value]())
+    of kNil: NilV
+    else: mkList(newSeq[Value]())
+  def "peek", proc (a: openArray[Value]): Value =
+    case a[0].kind
+    of kVector: (if a[0].vec.cnt == 0: NilV else: vecNth(a[0].vec, a[0].vec.cnt - 1))
+    of kNil: NilV
+    else: seqFirst(a[0])
+  def "pop", proc (a: openArray[Value]): Value =
+    case a[0].kind
+    of kVector:
+      if a[0].vec.cnt == 0: err("Can't pop empty vector")
+      let xs = vecToSeq(a[0].vec)
+      mkVector(xs[0 ..< xs.len - 1])
+    of kNil: NilV
+    else: seqRest(a[0])
+  def "subvec", proc (a: openArray[Value]): Value =
+    let xs = vecToSeq(a[0].vec)
+    let st = int(intOf(a[1]))
+    let en = (if a.len > 2: int(intOf(a[2])) else: xs.len)
+    if st < 0 or en > xs.len or st > en: err("Index out of bounds")
+    mkVector(xs[st ..< en])
+  def "assoc-in", proc (a: openArray[Value]): Value =
+    let ks = toSeq(a[1])
+    if ks.len == 0: return assocOne(a[0], NilV, a[2])
+    assocInImpl(a[0], ks, 0, a[2])
+  def "update-in", proc (a: openArray[Value]): Value =
+    let ks = toSeq(a[1])
+    updateInImpl(a[0], ks, 0, a[2], @(a[3 .. ^1]))
+  def "keep", proc (a: openArray[Value]): Value =
+    var r: seq[Value] = @[]
+    for x in elems(a[1]):
+      let y = call(a[0], [x])
+      if y.kind != kNil: r.add y
+    mkList(r)
+  def "keep-indexed", proc (a: openArray[Value]): Value =
+    var r: seq[Value] = @[]
+    var i = 0
+    for x in elems(a[1]):
+      let y = call(a[0], [mkInt(i), x])
+      if y.kind != kNil: r.add y
+      inc i
+    mkList(r)
+  def "shutdown-agents", proc (a: openArray[Value]): Value = NilV
+  def "max-key", proc (a: openArray[Value]): Value =
+    result = a[1]
+    var best = num(call(a[0], [a[1]]))
+    for i in 2 ..< a.len:
+      let k = num(call(a[0], [a[i]]))
+      if k >= best: best = k; result = a[i]
+  def "min-key", proc (a: openArray[Value]): Value =
+    result = a[1]
+    var best = num(call(a[0], [a[1]]))
+    for i in 2 ..< a.len:
+      let k = num(call(a[0], [a[i]]))
+      if k <= best: best = k; result = a[i]
+  def "ffirst", proc (a: openArray[Value]): Value = seqFirst(seqFirst(a[0]))
+  def "fnext", proc (a: openArray[Value]): Value = seqFirst(seqRest(a[0]))
+  def "nfirst", proc (a: openArray[Value]): Value =
+    let r = seqRest(seqFirst(a[0]))
+    (if seqIsEmpty(r): NilV else: r)
+  def "nnext", proc (a: openArray[Value]): Value =
+    let r = seqRest(seqRest(a[0]))
+    (if seqIsEmpty(r): NilV else: r)
+  def "nthnext", proc (a: openArray[Value]): Value =
+    seqDropOrNil(a[0], int(intOf(a[1])))
+  def "butlast", proc (a: openArray[Value]): Value =
+    let xs = toSeq(a[0])
+    (if xs.len <= 1: NilV else: mkList(xs[0 ..< xs.len - 1]))
+  def "take-last", proc (a: openArray[Value]): Value =
+    let xs = toSeq(a[1])
+    let n = int(intOf(a[0]))
+    (if xs.len == 0 or n <= 0: NilV else: mkList(xs[max(0, xs.len - n) .. ^1]))
+  def "list*", proc (a: openArray[Value]): Value =
+    var xs: seq[Value] = @[]
+    for i in 0 ..< a.len - 1: xs.add a[i]
+    for x in elems(a[^1]): xs.add x
+    (if xs.len == 0: NilV else: mkList(xs))
+  def "reduce-kv", proc (a: openArray[Value]): Value =
+    result = a[1]
+    if a[2].kind == kMap:
+      for e in mapEntries(a[2].m): result = call(a[0], [result, e.key, e.val])
+    elif a[2].kind == kVector:
+      for i, x in vecToSeq(a[2].vec): result = call(a[0], [result, mkInt(i), x])
+  def "run!", proc (a: openArray[Value]): Value =
+    for x in elems(a[1]): discard call(a[0], [x])
+    NilV
+  def "interleave", proc (a: openArray[Value]): Value =
+    var cs: seq[Cursor] = @[]
+    for c in a: cs.add cursor(c)
+    var r: seq[Value] = @[]
+    block outer:
+      while true:
+        var row: seq[Value] = @[]
+        for i in 0 ..< cs.len:
+          if not hasNext(cs[i]): break outer
+          row.add next(cs[i])
+        r.add row
+    mkList(r)
+  def "flatten", proc (a: openArray[Value]): Value =
+    var r: seq[Value] = @[]
+    if a[0].kind in {kList, kVector, kCons, kChunk, kLazy}: flattenInto(a[0], r)
+    mkList(r)
+  def "hash", proc (a: openArray[Value]): Value = mkInt(int64(hashValue(a[0])))
+  def "identical?", proc (a: openArray[Value]): Value =
+    if a[0].kind != a[1].kind: return FalseV
+    if a[0].obj.isNil: mkBool(a[0].raw == a[1].raw)
+    else: mkBool(a[0].obj == a[1].obj)
+  def "complement", proc (a: openArray[Value]): Value =
+    let f = a[0]
+    mkFn("complement", proc (args: openArray[Value]): Value =
+      mkBool(not truthy(call(f, args))))
+  def "fnil", proc (a: openArray[Value]): Value =
+    let f = a[0]
+    let dflts = @(a[1 .. ^1])
+    mkFn("fnil", proc (args: openArray[Value]): Value =
+      var xs = @args
+      for i in 0 ..< min(xs.len, dflts.len):
+        if xs[i].kind == kNil: xs[i] = dflts[i]
+      call(f, xs))
+  def "memoize", proc (a: openArray[Value]): Value =
+    let f = a[0]
+    var cache = emptyPMap()
+    mkFn("memoize", proc (args: openArray[Value]): Value =
+      let k = mkVector(@args)
+      if mapContains(cache, k): return mapGet(cache, k, NilV)
+      result = call(f, args)
+      cache = mapAssoc(cache, k, result))
+  def "seq?", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind in {kList, kCons, kChunk, kLazy})
+  def "filterv", proc (a: openArray[Value]): Value =
+    var r: seq[Value] = @[]
+    for x in elems(a[1]):
+      if truthy(call(a[0], [x])): r.add x
+    mkVector(r)
+  def "not-any?", proc (a: openArray[Value]): Value =
+    for x in elems(a[1]):
+      if truthy(call(a[0], [x])): return FalseV
+    TrueV
+  def "not-every?", proc (a: openArray[Value]): Value =
+    for x in elems(a[1]):
+      if not truthy(call(a[0], [x])): return TrueV
+    FalseV
+  def "every-pred", proc (a: openArray[Value]): Value =
+    let ps = @a
+    mkFn("every-pred", proc (args: openArray[Value]): Value =
+      for p in ps:
+        for x in args:
+          if not truthy(call(p, [x])): return FalseV
+      TrueV)
+  def "some-fn", proc (a: openArray[Value]): Value =
+    let ps = @a
+    mkFn("some-fn", proc (args: openArray[Value]): Value =
+      for p in ps:
+        for x in args:
+          let r = call(p, [x])
+          if truthy(r): return r
+      NilV)
+  def "sequential?", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind in {kList, kVector, kCons, kChunk, kLazy})
+  def "seqable?", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind in {kNil, kList, kVector, kMap, kSet, kStr, kCons, kChunk, kLazy} or
+           not objMethod(a[0], "seq").isNil)
+  def "integer?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kInt)
+  def "boolean?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kBool)
+  def "double?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kFloat)
+  def "ident?", proc (a: openArray[Value]): Value = mkBool(a[0].kind in {kKeyword, kSymbol})
+  def "qualified-keyword?", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind == kKeyword and splitName(a[0].s)[2])
+  def "simple-keyword?", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind == kKeyword and not splitName(a[0].s)[2])
+  def "namespace", proc (a: openArray[Value]): Value =
+    if a[0].kind notin {kKeyword, kSymbol}: err("namespace expects a keyword or symbol")
+    let (ns, _, has) = splitName(a[0].s)
+    (if has: mkStr(ns) else: NilV)
+  # ---- clojure.set
+  def "clojure.set/union", proc (a: openArray[Value]): Value =
+    var m = emptyPMap()
+    for s in a:
+      for x in elems(s): m = mapAssoc(m, x, x)
+    mkSetOf(m)
+  def "clojure.set/intersection", proc (a: openArray[Value]): Value =
+    var m = setOf(a[0])
+    for i in 1 ..< a.len:
+      let other = setOf(a[i])
+      for e in mapEntries(m):
+        if not mapContains(other, e.key): m = mapDissoc(m, e.key)
+    mkSetOf(m)
+  def "clojure.set/difference", proc (a: openArray[Value]): Value =
+    var m = setOf(a[0])
+    for i in 1 ..< a.len:
+      for x in elems(a[i]): m = mapDissoc(m, x)
+    mkSetOf(m)
+  def "clojure.set/subset?", proc (a: openArray[Value]): Value =
+    let b = setOf(a[1])
+    for x in elems(a[0]):
+      if not mapContains(b, x): return FalseV
+    TrueV
+  def "clojure.set/superset?", proc (a: openArray[Value]): Value =
+    let b = setOf(a[0])
+    for x in elems(a[1]):
+      if not mapContains(b, x): return FalseV
+    TrueV
+  def "clojure.set/select", proc (a: openArray[Value]): Value =
+    var m = emptyPMap()
+    for x in elems(a[1]):
+      if truthy(call(a[0], [x])): m = mapAssoc(m, x, x)
+    mkSetOf(m)
+  def "clojure.set/map-invert", proc (a: openArray[Value]): Value =
+    var m = emptyPMap()
+    for e in mapEntries(a[0].m): m = mapAssoc(m, e.val, e.key)
+    mkMapOf(m)
+  # ---- instants and uuids
+  def "inst?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kInst)
+  def "inst-ms", proc (a: openArray[Value]): Value =
+    if a[0].kind != kInst: err("inst-ms expects an instant")
+    mkInt(a[0].i)
+  def "java.util.Date.", proc (a: openArray[Value]): Value =
+    (if a.len == 0: mkInst(int64(epochTime() * 1000)) else: mkInst(intOf(a[0])))
+  def "uuid?", proc (a: openArray[Value]): Value = mkBool(a[0].kind == kUuid)
+  def "parse-uuid", proc (a: openArray[Value]): Value =
+    (if validUuid(sOf(a[0])): mkUuid(sOf(a[0])) else: NilV)
+  def "random-uuid", proc (a: openArray[Value]): Value = mkUuid(randomUuidStr())
+  def "java.util.UUID/randomUUID", proc (a: openArray[Value]): Value =
+    mkUuid(randomUuidStr())
+  def "java.util.UUID/fromString", proc (a: openArray[Value]): Value =
+    if not validUuid(sOf(a[0])): err("Invalid UUID string: " & sOf(a[0]))
+    mkUuid(sOf(a[0]))
+  # ---- reading data
+  def "*data-readers*", mkMapOf(emptyPMap())
+  def "*default-data-reader-fn*", NilV
+  def "read-string", proc (a: openArray[Value]): Value =
+    ## Tags resolve through *data-readers* and *default-data-reader-fn*, which
+    ## a program can set with binding, as on the JVM.
+    if a.len > 1: return readOne(sOf(a[1]), ednTagFn(a[0]))
+    let readers = (if hasVar("*data-readers*"): getVar("*data-readers*") else: NilV)
+    let dflt = (if hasVar("*default-data-reader-fn*"): getVar("*default-data-reader-fn*")
+                else: NilV)
+    readOne(sOf(a[0]), ednTagFn(mkMap(@[(mkKeyword("readers"), readers),
+                                        (mkKeyword("default"), dflt)])))
+  def "clojure.edn/read-string", proc (a: openArray[Value]): Value =
+    let opts = (if a.len > 1: a[0] else: NilV)
+    let src = (if a.len > 1: a[1] else: a[0])
+    if src.kind == kNil: return NilV
+    let eofV = (if opts.kind == kMap: mapGet(opts.m, mkKeyword("eof"), NilV) else: NilV)
+    let hasEof = opts.kind == kMap and mapContains(opts.m, mkKeyword("eof"))
+    readOne(sOf(src), ednTagFn(opts), eofV, not hasEof)
+  # ---- objects
+  def "clonim.rt/make-object", proc (a: openArray[Value]): Value =
+    mkObject(sOf(a[0]), a[1])
+  def "clonim.rt/invoke-method", proc (a: openArray[Value]): Value =
+    ## (. obj method args...) on a reify/deftype instance.
+    objCall(a[0], sOf(a[1]), a[2 .. ^1])
+  def "clonim.rt/object-type", proc (a: openArray[Value]): Value =
+    (if a[0].kind == kObject: mkStr(a[0].obj.otype) else: NilV)
+
 proc registerCoreCollections*() =
+  registerCoreData()
   # ---- collections
   def "list", proc (a: openArray[Value]): Value = mkList(a)
   def "vector", proc (a: openArray[Value]): Value = mkVector(a)
@@ -871,21 +1369,9 @@ proc registerCoreCollections*() =
     var i = 1
     while i + 1 < a.len:
       result = assocOne(result, a[i], a[i + 1]); i += 2
-  def "dissoc", proc (a: openArray[Value]): Value =
-    var m = a[0].m
-    for i in 1 ..< a.len: m = mapDissoc(m, a[i])
-    mkMapOf(m)
   def "update", proc (a: openArray[Value]): Value =
     let cur = getIn(a[0], a[1], NilV)
     assocOne(a[0], a[1], call(a[2], @[cur] & @(a[3 .. ^1])))
-  def "keys", proc (a: openArray[Value]): Value =
-    var r: seq[Value] = @[]
-    for e in mapEntries(a[0].m): r.add e.key
-    (if r.len == 0: NilV else: mkList(r))
-  def "vals", proc (a: openArray[Value]): Value =
-    var r: seq[Value] = @[]
-    for e in mapEntries(a[0].m): r.add e.val
-    (if r.len == 0: NilV else: mkList(r))
   def "reverse", proc (a: openArray[Value]): Value =
     let s = toSeq(a[0])
     var r: seq[Value] = @[]
@@ -919,40 +1405,6 @@ proc registerCoreCollections*() =
   def "dorun", proc (a: openArray[Value]): Value =
     for x in elems(a[0]): discard
     NilV
-  def "sort", proc (a: openArray[Value]): Value =
-    var s = toSeq(a[^1])
-    let cmpFn = (if a.len > 1: a[0] else: NilV)
-    # insertion sort keeps it simple and stable
-    for i in 1 ..< s.len:
-      var j = i
-      while j > 0:
-        let before =
-          if cmpFn.kind == kFn: truthy(call(cmpFn, [s[j], s[j - 1]]))
-          elif s[j].kind == kStr: s[j].s < s[j - 1].s
-          else: num(s[j]) < num(s[j - 1])
-        if not before: break
-        swap(s[j], s[j - 1]); dec j
-    mkList(s)
-  def "sort-by", proc (a: openArray[Value]): Value =
-    var s = toSeq(a[^1])
-    let kf = a[0]
-    for i in 1 ..< s.len:
-      var j = i
-      while j > 0:
-        let ka = call(kf, [s[j]])
-        let kb = call(kf, [s[j - 1]])
-        let before = (if ka.kind == kStr: ka.s < kb.s else: num(ka) < num(kb))
-        if not before: break
-        swap(s[j], s[j - 1]); dec j
-    mkList(s)
-  def "distinct", proc (a: openArray[Value]): Value =
-    var r: seq[Value] = @[]
-    for x in elems(a[0]):
-      var dup = false
-      for y in r:
-        if equals(x, y): dup = true; break
-      if not dup: r.add x
-    mkList(r)
   def "interpose", proc (a: openArray[Value]): Value =
     var r: seq[Value] = @[]
     for x in elems(a[1]):
@@ -1110,7 +1562,9 @@ proc registerCoreStateHost*() =
   def "agent-error", proc (a: openArray[Value]): Value = agentError(a[0])
   def "restart-agent", proc (a: openArray[Value]): Value = restartAgent(a[0], a[1])
   def "deref", proc (a: openArray[Value]): Value =
-    if a[0].kind == kAgent: agentDeref(a[0]) else: call(a[0], [])
+    if a[0].kind == kAgent: agentDeref(a[0])
+    elif a[0].kind == kObject: objCall(a[0], "deref", [])
+    else: call(a[0], [])
   def "reset!", proc (a: openArray[Value]): Value = call(a[0], [mkKeyword("set"), a[1]])
   def "swap!", proc (a: openArray[Value]): Value =
     let cur = call(a[0], [])
@@ -1118,8 +1572,12 @@ proc registerCoreStateHost*() =
     call(a[0], [mkKeyword("set"), nv])
 
   def "ex-message", proc (a: openArray[Value]): Value =
-    ## Thrown values reach a catch clause as their message string.
-    (if a[0].kind == kStr: a[0] else: NilV)
+    ## A thrown string reaches a catch clause as itself; ex-info as an object.
+    if a[0].kind == kStr: a[0]
+    elif not objMethod(a[0], "getMessage").isNil: objCall(a[0], "getMessage", [])
+    else: NilV
+  def "ex-data", proc (a: openArray[Value]): Value =
+    (if objMethod(a[0], "getData").isNil: NilV else: objCall(a[0], "getData", []))
   def "volatile!", proc (a: openArray[Value]): Value =
     var cell = a[0]
     mkFn("volatile", proc (args: openArray[Value]): Value =
@@ -1134,6 +1592,8 @@ proc registerCoreStateHost*() =
   def "boolean", proc (a: openArray[Value]): Value = mkBool(truthy(a[0]))
   def "class", proc (a: openArray[Value]): Value = mkKeyword($a[0].kind)
   def "instance?", proc (a: openArray[Value]): Value =
+    if a[1].kind == kObject:
+      return mkBool(a[0].kind in {kKeyword, kStr, kSymbol} and a[0].s == a[1].obj.otype)
     mkBool(a[0].kind == kKeyword and a[0].s == $a[1].kind)
   def "format", proc (a: openArray[Value]): Value = mkStr(javaFormat(sOf(a[0]), a[1 .. ^1]))
   def "System/exit", proc (a: openArray[Value]): Value =
@@ -1159,8 +1619,12 @@ proc registerCoreStateHost*() =
   def "clojure.string/index-of", proc (a: openArray[Value]): Value =
     let i = sOf(a[0]).find(sOf(a[1]))
     (if i < 0: NilV else: mkInt(int64(i)))
-  def "throw", proc (a: openArray[Value]): Value = err(str(a[0]))
-  def "ex-info", proc (a: openArray[Value]): Value = mkStr(str(a[0]))
+  def "throw", proc (a: openArray[Value]): Value =
+    if a[0].kind == kObject and not objMethod(a[0], "getMessage").isNil:
+      throwValue(str(objCall(a[0], "getMessage", [])), a[0])
+    err(str(a[0]))
+  def "ex-info", proc (a: openArray[Value]): Value =
+    exInfo(str(a[0]), (if a.len > 1: a[1] else: mkMapOf(emptyPMap())))
   def "time-ms", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))
 
 proc aliasSelectedCore(names: openArray[string]) =

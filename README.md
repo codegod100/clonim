@@ -149,7 +149,32 @@ tail another seq still holds simply survives.
 `let` `loop`/`recur` `if` `when` `when-not` `if-not` `cond` `when-let` `if-let`
 `do` `and` `or` `->` `->>` `doseq` `dotimes` `try`/`catch`/`finally` `quote`
 
-Destructuring: sequential `[a b & rest]` and associative `{:keys [x y]}` in `let`.
+Destructuring: sequential `[a b & rest]` and associative `{:keys [x y]}` in `let`,
+`loop`, `doseq`, `when-let`/`if-let` and parameter lists.
+
+`for` takes `:when`, `:let` and `:while`; `doseq` takes several bindings and the
+same modifiers; `while` loops.
+
+Types: `reify`, `deftype` and `defprotocol`. Methods dispatch by name, so an
+object that implements `valAt`, `seq`, `count`, `containsKey`, `deref`,
+`invoke`, `toString`, `equals` or `hashCode` works with `get`, keyword lookup,
+`seq`/`keys`, `count`, `contains?`, `@`, calls, `str`, `=` and `hash`.
+`(.method obj args)`, `(. obj method args)` and `(Type. args)` call methods and
+constructors.
+
+Reading data: `read-string` (honouring `*data-readers*` and
+`*default-data-reader-fn*`) and `clojure.edn/read-string` with `:readers`,
+`:default` and `:eof`. `#inst` and `#uuid` read as instants and UUIDs, which
+print, compare and hash as on the JVM (`inst-ms`, `java.util.Date.`,
+`random-uuid`, `parse-uuid`).
+
+Errors: `ex-info` values keep their data through `throw` and `catch`
+(`ex-message`, `ex-data`).
+
+Ordering: `compare` is Clojure's total order within a type (numbers, strings,
+keywords, symbols, booleans, chars, vectors, instants, UUIDs). `sort` and
+`sort-by` take a comparator or boolean predicate and are stable
+O(n log n) merge sorts.
 
 Data: nil, bool, int, float, string, keyword, symbol, list, vector, map, set —
 persistent, with structural equality, hashing, and Clojure-shaped printing. Atoms, closures, `comp`,
@@ -171,10 +196,8 @@ library above returns them where Clojure does.
 - **Chunked seqs.** Lazy seqs are unchunked, so full realization allocates two
   cells per element and runs ~2× slower than the old eager path. 32-element
   chunking is the fix, at the cost of exact demand.
-- **Destructuring in parameter lists.** `(let [[a b] xs] …)` works; `(defn f
-  [[a b]] …)` does not.
-- Protocols/records, dynamic namespace operations, refs/agents,
-  `#()` literals, syntax-quote, transducers, Nim interop.
+- Records and multimethods, dynamic namespace operations, refs,
+  syntax-quote, transducers, Nim interop.
 
 ## Tests
 

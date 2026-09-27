@@ -195,6 +195,9 @@ proc quoteLit(v: Value): string =
   of kCons, kChunk, kLazy: err("Can't quote a lazy seq")
   of kFn: err("Can't quote a function")
   of kAgent: err("Can't quote an agent")
+  of kInst: "mkInst(" & $v.i & ")"
+  of kUuid: "mkUuid(" & nimStr(v.s) & ")"
+  of kObject: err("Can't quote an object")
 
 proc emptySeqFix(s: string, elemType: string): string =
   ## `@[]` has no inferable element type in Nim; annotate it.
@@ -615,7 +618,10 @@ proc genLet(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
   let lenv = newEnv(env)
   var i = 0
   while i < bindings.items.len:
-    let v = genExpr(bindings.items[i + 1], lenv, c)
+    # A destructuring pattern reads its value once per element, so the value
+    # must be computed once into a local rather than inlined as an expression.
+    let v = (if bindings.items[i].kind == kSymbol: genExpr(bindings.items[i + 1], lenv, c)
+             else: genExprTemp(bindings.items[i + 1], lenv, c))
     bindPattern(bindings.items[i], v, lenv, c)
     i += 2
   genBody(body, dst, lenv, c)
@@ -892,7 +898,7 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
   ## Keeping a subexpression as an expression is what lets the C compiler hold
   ## it in a register instead of round-tripping it through a Value slot.
   case f.kind
-  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword:
+  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword, kInst, kUuid:
     quoteLit(f)
   of kSymbol:
     let local = env.lookup(f.s)
@@ -950,7 +956,7 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
     if hv.len == 0: return ""
     "call(" & hv & ", " &
       (if ids.len == 0: "emptyArgs" else: "[" & ids.join(", ") & "]") & ")"
-  of kFn, kAgent, kCons, kChunk, kLazy:
+  of kFn, kAgent, kCons, kChunk, kLazy, kObject:
     ""
 
 proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
@@ -960,7 +966,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
   if e.len > 0:
     c.line(dst & " = " & e); return
   case f.kind
-  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword:
+  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword, kInst, kUuid:
     c.line(dst & " = " & quoteLit(f))
   of kSymbol:
     let local = env.lookup(f.s)
@@ -988,6 +994,8 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
     err("Can't emit a function literal")
   of kAgent:
     err("Can't emit an agent literal")
+  of kObject:
+    err("Can't emit an object literal")
   of kCons, kChunk, kLazy:
     err("Can't emit a lazy seq literal")
   of kList:
@@ -1251,7 +1259,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
           c.push
           let benv = newEnv(env)
           let id = c.gensym("l" & mangle(catchSym))
-          c.line("var " & id & ": Value = mkStr(getCurrentExceptionMsg())")
+          c.line("var " & id & ": Value = caughtValue()")
           benv.locals[catchSym] = id
           genBody(catchBody, dst, benv, c)
           c.pop

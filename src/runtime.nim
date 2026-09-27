@@ -6,7 +6,7 @@
 ## collection. Maps and sets additionally remember insertion order — every
 ## entry carries an `ord` stamp and iteration sorts by it — so printing and
 ## `keys`/`vals` stay predictable the way Clojure's small array-maps are.
-import std/[tables, strutils, hashes, bitops, algorithm, unicode]
+import std/[tables, strutils, hashes, bitops, algorithm, unicode, times, math]
 import runtime_types
 export runtime_types
 
@@ -17,6 +17,21 @@ const
   MaxShift = 30        # beyond this a HAMT runs out of hash bits
 
 proc err*(msg: string) {.noreturn.} = raise newException(CljError, msg)
+
+proc throwValue*(msg: string, payload: Value) {.noreturn.} =
+  ## Raise with the thrown value attached, so catch can bind it rather than
+  ## just its message (ex-info data survives the throw).
+  var e = newException(CljError, msg)
+  e.payload = payload
+  raise e
+
+proc caughtValue*(): Value =
+  ## What a catch clause binds: the thrown value, or its message.
+  let e = getCurrentException()
+  if e of (ref CljError):
+    let p = (ref CljError)(e).payload
+    if not p.isNil: return p
+  Value(kind: kStr, obj: Obj(kind: kStr, s: e.msg))
 
 proc equals*(a, b: Value): bool
 proc hashValue*(v: Value): uint32
@@ -295,6 +310,95 @@ proc mkList*(xs: openArray[Value]): Value = mkList(@xs)
 proc mkVector*(xs: openArray[Value]): Value = mkVector(@xs)
 proc mkSet*(xs: openArray[Value]): Value = mkSet(@xs)
 
+proc mkInst*(ms: int64): Value {.inline.} = Value(kind: kInst, raw: ms)
+proc mkUuid*(x: string): Value = Value(kind: kUuid, obj: Obj(kind: kUuid, s: x.toLowerAscii))
+proc mkObject*(typeName: string, methods: Value): Value =
+  Value(kind: kObject, obj: Obj(kind: kObject, otype: typeName, methods: methods))
+
+proc objMethod*(v: Value, name: string): Value =
+  ## The fn implementing `name` on an object, or nil when it has none.
+  if v.kind != kObject or v.obj.methods.kind != kMap: return NilV
+  mapGet(v.obj.methods.m, Value(kind: kStr, obj: Obj(kind: kStr, s: name)), NilV)
+
+proc objCall*(v: Value, name: string, args: openArray[Value]): Value =
+  ## Invoke a method, passing the object itself as `this`.
+  let f = objMethod(v, name)
+  if f.isNil:
+    err("No method " & name & " on " & v.obj.otype)
+  call(f, @[v] & @args)
+
+# ------------------------------------------------------------ instants
+## An instant is milliseconds since the epoch, UTC, printed the way Clojure
+## prints java.util.Date: #inst "2026-01-02T03:04:05.006-00:00".
+
+proc instIso*(ms: int64): string =
+  let secs = floorDiv(ms, 1000)
+  let milli = ms - secs * 1000
+  let t = fromUnix(secs).utc
+  t.format("yyyy-MM-dd'T'HH:mm:ss") & "." & align($milli, 3, '0') & "-00:00"
+
+proc instJavaStr*(ms: int64): string =
+  ## java.util.Date#toString, in UTC.
+  let t = fromUnix(floorDiv(ms, 1000)).utc
+  t.format("ddd MMM dd HH:mm:ss") & " UTC " & t.format("yyyy")
+
+proc parseInst*(src: string): int64 =
+  ## RFC 3339 as the #inst reader accepts it: a date, optionally followed by
+  ## a time, fraction and offset, each part optional from the right.
+  var i = 0
+  proc digits(n: int): int =
+    if i + n > src.len: err("Unrecognized date/time syntax: " & src)
+    for k in 0 ..< n:
+      if src[i + k] notin Digits: err("Unrecognized date/time syntax: " & src)
+    result = parseInt(src[i ..< i + n])
+    i += n
+  proc expect(c: char): bool =
+    if i < src.len and src[i] == c:
+      inc i
+      return true
+    false
+  let year = digits(4)
+  var month, day = 1
+  var hour, minute, second, milli = 0
+  if expect('-'):
+    month = digits(2)
+    if expect('-'):
+      day = digits(2)
+      if expect('T'):
+        hour = digits(2)
+        if expect(':'):
+          minute = digits(2)
+          if expect(':'):
+            second = digits(2)
+            if expect('.'):
+              var frac = ""
+              while i < src.len and src[i] in Digits:
+                frac.add src[i]; inc i
+              frac = (frac & "000")[0 .. 2]
+              milli = parseInt(frac)
+  var offsetMin = 0
+  if i < src.len:
+    if src[i] == 'Z': inc i
+    elif src[i] in {'+', '-'}:
+      let sign = (if src[i] == '-': -1 else: 1)
+      inc i
+      let oh = digits(2)
+      discard expect(':')
+      let om = digits(2)
+      offsetMin = sign * (oh * 60 + om)
+  if i != src.len: err("Unrecognized date/time syntax: " & src)
+  let dt = dateTime(year, Month(month), MonthdayRange(day), HourRange(hour),
+                    MinuteRange(minute), SecondRange(second), 0, utc())
+  (dt.toTime.toUnix - offsetMin * 60) * 1000 + milli
+
+proc validUuid*(src: string): bool =
+  if src.len != 36: return false
+  for i, c in src:
+    if i in [8, 13, 18, 23]:
+      if c != '-': return false
+    elif c notin HexDigits: return false
+  true
+
 proc mkFn*(name: string, f: proc (args: openArray[Value]): Value {.closure.}): Value =
   Value(kind: kFn, obj: Obj(kind: kFn, fn: f, name: name))
 
@@ -528,6 +632,12 @@ proc hashValue*(v: Value): uint32 =
       h = h xor mixHash(hashValue(e.key), hashValue(e.val))
     h
   of kFn, kAgent: uint32(hash(cast[int](cast[pointer](v.obj))))
+  of kInst: mixHash(6'u32, uint32(hash(v.i)))
+  of kUuid: mixHash(7'u32, uint32(hash(v.s)))
+  of kObject:
+    let h = objMethod(v, "hashCode")
+    if h.isNil: uint32(hash(cast[int](cast[pointer](v.obj))))
+    else: uint32(call(h, [v]).i and 0xffffffff'i64)
 
 # --------------------------------------------------------------- accessors
 proc items*(v: Value): seq[Value] =
@@ -561,6 +671,9 @@ proc count*(v: Value): int =
   of kVector: v.vec.cnt
   of kMap, kSet: v.m.cnt
   of kStr: v.s.len
+  of kObject:
+    if not objMethod(v, "count").isNil: int(objCall(v, "count", []).i)
+    else: toSeq(v).len
   of kCons, kChunk, kLazy:
     # realizes the whole seq, which is the honest cost of counting one
     var n = 0
@@ -612,6 +725,12 @@ proc equals*(a, b: Value): bool =
       if not equals(e.val, mapGet(b.m, e.key, missing)): return false
     true
   of kFn, kAgent: a == b
+  of kInst: a.i == b.i
+  of kUuid: a.s == b.s
+  of kObject:
+    let eqm = objMethod(a, "equals")
+    if eqm.isNil: a.obj == b.obj
+    else: truthy(call(eqm, [a, b]))
   of kList, kVector, kCons, kChunk, kLazy: false  # handled above
 # ---------------------------------------------------------------- printing
 proc escapeStr(s: string): string =
@@ -669,6 +788,13 @@ proc toStr*(v: Value, readable: bool): string =
     "{" & parts.join(", ") & "}"
   of kFn: "#<fn " & v.name & ">"
   of kAgent: "#<agent>"
+  of kInst:
+    if readable: "#inst \"" & instIso(v.i) & "\"" else: instJavaStr(v.i)
+  of kUuid: (if readable: "#uuid \"" & v.s & "\"" else: v.s)
+  of kObject:
+    let m = objMethod(v, "toString")
+    if m.isNil: "#object[" & v.obj.otype & "]"
+    else: toStr(call(m, [v]), false)
 
 proc prStr*(v: Value): string = toStr(v, true)
 proc str*(v: Value): string = toStr(v, false)
@@ -709,6 +835,10 @@ proc call*(f: Value, args: openArray[Value]): Value =
     # (:k m) => lookup
     if args.len == 0: err("Wrong number of args to keyword")
     let m = args[0]
+    if m.kind == kObject and not objMethod(m, "valAt").isNil:
+      var vargs = @[f]
+      for i in 1 ..< args.len: vargs.add args[i]
+      return objCall(m, "valAt", vargs)
     if m.isNil or m.kind notin {kMap, kSet}: return NilV
     mapGet(m.m, f, (if args.len > 1: args[1] else: NilV))
   of kMap:
@@ -722,6 +852,10 @@ proc call*(f: Value, args: openArray[Value]): Value =
   of kVector:
     if args.len != 1 or args[0].kind != kInt: err("Vector lookup needs one int")
     vecNth(f.vec, int(args[0].i))
+  of kObject:
+    if not objMethod(f, "invoke").isNil: objCall(f, "invoke", args)
+    elif args.len > 0 and not objMethod(f, "valAt").isNil: objCall(f, "valAt", args)
+    else: err("Can't call object " & f.obj.otype)
   else: err("Can't call value of kind " & $f.kind & ": " & prStr(f))
 
 proc argAt*(args: openArray[Value], i: int): Value =
@@ -749,6 +883,10 @@ proc toSeq*(v: Value): seq[Value] =
     var r: seq[Value] = @[]
     for e in mapEntries(v.m): r.add mkVector(@[e.key, e.val])
     r
+  of kObject:
+    if objMethod(v, "seq").isNil:
+      err("Don't know how to create seq from: " & prStr(v))
+    toSeq(objCall(v, "seq", []))
   else: err("Don't know how to create seq from: " & prStr(v))
 
 ## True while a var still holds the exact fn a call site was compiled against.

@@ -8,6 +8,9 @@ type
     pos: int
     line: int
     anonId: int
+    tagFn: TagFn    ## data readers for tags other than #inst and #uuid
+
+  TagFn* = proc (tag: string, form: Value): Value {.closure.}
 
 proc peek(r: Reader): char =
   (if r.pos < r.src.len: r.src[r.pos] else: '\0')
@@ -227,12 +230,38 @@ proc readForm(r: var Reader): Value =
       var params: seq[Value] = @[]
       for i in 1 .. arity: params.add mkSymbol(arg & "_" & $i)
       return mkList(@[mkSymbol("fn"), mkVector(params), form])
+    if r.peek2 in Letters:
+      # A tagged literal: #inst "…", #uuid "…", or a user tag such as #db/id.
+      discard r.advance
+      let tag = r.readToken
+      let form = r.readForm
+      case tag
+      of "inst":
+        if form.kind != kStr: r.readerErr("#inst requires a string")
+        return mkInst(parseInst(form.s))
+      of "uuid":
+        if form.kind != kStr or not validUuid(form.s):
+          r.readerErr("Invalid #uuid: " & prStr(form))
+        return mkUuid(form.s)
+      else:
+        if r.tagFn.isNil: r.readerErr("No reader function for tag " & tag)
+        return r.tagFn(tag, form)
     r.readerErr("Unsupported dispatch: #" & r.peek2
       )
   else:
     let tok = r.readToken
     if tok.len == 0: r.readerErr("Unexpected character: " & c)
     return r.parseAtom(tok)
+
+proc readOne*(src: string, tagFn: TagFn = nil, eof: Value = NilV,
+              eofError = true): Value =
+  ## The first form in `src`, as read-string reads it.
+  var r = Reader(src: src, pos: 0, line: 1, tagFn: tagFn)
+  r.skipWs
+  if r.pos >= r.src.len:
+    if eofError: r.readerErr("EOF while reading")
+    return eof
+  r.readForm
 
 proc readAll*(src: string): seq[Value] =
   var r = Reader(src: src, pos: 0, line: 1)
