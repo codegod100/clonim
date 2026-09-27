@@ -195,6 +195,9 @@ proc quoteLit(v: Value): string =
   of kCons, kChunk, kLazy: err("Can't quote a lazy seq")
   of kFn: err("Can't quote a function")
   of kAgent: err("Can't quote an agent")
+  of kInst: "mkInst(" & $v.i & ")"
+  of kUuid: "mkUuid(" & nimStr(v.s) & ")"
+  of kObject: err("Can't quote an object")
 
 proc emptySeqFix(s: string, elemType: string): string =
   ## `@[]` has no inferable element type in Nim; annotate it.
@@ -892,7 +895,7 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
   ## Keeping a subexpression as an expression is what lets the C compiler hold
   ## it in a register instead of round-tripping it through a Value slot.
   case f.kind
-  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword:
+  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword, kInst, kUuid:
     quoteLit(f)
   of kSymbol:
     let local = env.lookup(f.s)
@@ -950,7 +953,7 @@ proc tryExpr(f: Value, env: Env, c: Ctx): string =
     if hv.len == 0: return ""
     "call(" & hv & ", " &
       (if ids.len == 0: "emptyArgs" else: "[" & ids.join(", ") & "]") & ")"
-  of kFn, kAgent, kCons, kChunk, kLazy:
+  of kFn, kAgent, kCons, kChunk, kLazy, kObject:
     ""
 
 proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
@@ -960,7 +963,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
   if e.len > 0:
     c.line(dst & " = " & e); return
   case f.kind
-  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword:
+  of kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword, kInst, kUuid:
     c.line(dst & " = " & quoteLit(f))
   of kSymbol:
     let local = env.lookup(f.s)
@@ -988,6 +991,8 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
     err("Can't emit a function literal")
   of kAgent:
     err("Can't emit an agent literal")
+  of kObject:
+    err("Can't emit an object literal")
   of kCons, kChunk, kLazy:
     err("Can't emit a lazy seq literal")
   of kList:
@@ -1251,7 +1256,7 @@ proc genInto(f: Value, dst: string, env: Env, c: Ctx) =
           c.push
           let benv = newEnv(env)
           let id = c.gensym("l" & mangle(catchSym))
-          c.line("var " & id & ": Value = mkStr(getCurrentExceptionMsg())")
+          c.line("var " & id & ": Value = caughtValue()")
           benv.locals[catchSym] = id
           genBody(catchBody, dst, benv, c)
           c.pop

@@ -5,7 +5,8 @@
 type
   Kind* = enum
     kNil, kBool, kInt, kFloat, kChar, kStr, kKeyword, kSymbol,
-    kList, kVector, kMap, kSet, kCons, kChunk, kLazy, kFn, kAgent
+    kList, kVector, kMap, kSet, kCons, kChunk, kLazy, kFn, kAgent,
+    kInst, kUuid, kObject
 
   AgentAction* = object
     fn*: Value
@@ -64,8 +65,8 @@ type
   Obj* = ref ValueObj
   ValueObj* = object
     case kind*: Kind
-    of kNil, kBool, kInt, kFloat, kChar: discard
-    of kStr, kKeyword, kSymbol: s*: string
+    of kNil, kBool, kInt, kFloat, kChar, kInst: discard
+    of kStr, kKeyword, kSymbol, kUuid: s*: string
     of kList: xs*: seq[Value]
     of kVector: vec*: PVec
     of kMap, kSet: m*: PMap
@@ -85,6 +86,11 @@ type
       name*: string
     of kAgent:
       agent*: Agent
+    of kObject:
+      ## An instance of a reify/deftype: a type name and its methods, keyed
+      ## by method name. Fields live in the methods' closures.
+      otype*: string
+      methods*: Value
 
   Value* = object
     kind*: Kind
@@ -92,6 +98,7 @@ type
     obj*: Obj
 
   CljError* = object of CatchableError
+    payload*: Value   ## the thrown value, when it is more than a message
 
   VarCell* = ref object
     name*: string
@@ -127,7 +134,7 @@ var draining = false
 
 proc `=destroy`*(x: var ValueObj) =
   case x.kind
-  of kStr, kKeyword, kSymbol: `=destroy`(x.s)
+  of kStr, kKeyword, kSymbol, kUuid: `=destroy`(x.s)
   of kList: `=destroy`(x.xs)
   of kVector: `=destroy`(x.vec)
   of kMap, kSet: `=destroy`(x.m)
@@ -135,6 +142,9 @@ proc `=destroy`*(x: var ValueObj) =
     `=destroy`(x.fn)
     `=destroy`(x.name)
   of kAgent: `=destroy`(x.agent)
+  of kObject:
+    `=destroy`(x.otype)
+    `=destroy`(x.methods)
   of kCons:
     `=destroy`(x.head)
     if not x.tl.isNil: pendingFree.add x.tl
@@ -147,7 +157,7 @@ proc `=destroy`*(x: var ValueObj) =
     `=destroy`(x.thunk)
     if not x.cached.isNil: pendingFree.add x.cached
     `=destroy`(x.cached)
-  of kNil, kBool, kInt, kFloat, kChar: discard
+  of kNil, kBool, kInt, kFloat, kChar, kInst: discard
   if draining: return
   draining = true
   while pendingFree.len > 0:

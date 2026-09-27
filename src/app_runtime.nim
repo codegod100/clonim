@@ -27,6 +27,7 @@ proc registerCoreStateHost*(names: openArray[string])
 proc registerNamespaceCore*() {.importc: "clonim_register_namespace_core".}
 
 proc err*(msg: string) {.noreturn, importc: "clonim_err".}
+proc caughtValue*(): Value {.importc: "clonim_caught_value".}
 proc varCell*(name: string): VarCell {.importc: "clonim_var_cell".}
 proc setVar*(name: string, v: Value): Value {.discardable, importc: "clonim_set_var".}
 proc cellGet*(c: VarCell): Value {.importc: "clonim_cell_get".}
@@ -48,6 +49,8 @@ proc mkInt*(x: int64): Value {.importc: "clonim_mk_int".}
 proc mkFloat*(x: float64): Value {.importc: "clonim_mk_float".}
 proc mkChar*(code: int64): Value {.importc: "clonim_mk_char".}
 proc mkStr*(x: string): Value {.importc: "clonim_mk_str".}
+proc mkInst*(ms: int64): Value {.importc: "clonim_mk_inst".}
+proc mkUuid*(x: string): Value {.importc: "clonim_mk_uuid".}
 proc mkKeyword*(x: string): Value {.importc: "clonim_mk_keyword".}
 proc mkSymbol*(x: string): Value {.importc: "clonim_mk_symbol".}
 proc mkList*(xs: openArray[Value]): Value {.importc: "clonim_mk_list".}
