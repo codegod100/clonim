@@ -25,6 +25,7 @@ when defined(releaseCompiler):
     EmbeddedCore = staticRead("core.nim")
     EmbeddedNamespaces = staticRead("namespaces.nim")
     EmbeddedReader = staticRead("reader.nim")
+    EmbeddedRuntimeLib = staticRead("runtime_lib.nim")
     EmbeddedCoreStdlib = staticRead("../stdlib/clonim/core.clj")
     EmbeddedJavaIoStdlib = staticRead("../stdlib/clojure/java/io.clj")
     EmbeddedMvnHttpStdlib = staticRead("../stdlib/jolt/mvn_http.clj")
@@ -38,6 +39,7 @@ when defined(releaseCompiler):
     h = h !& hash(EmbeddedCore)
     h = h !& hash(EmbeddedNamespaces)
     h = h !& hash(EmbeddedReader)
+    h = h !& hash(EmbeddedRuntimeLib)
     h = h !& hash(EmbeddedCoreStdlib)
     h = h !& hash(EmbeddedJavaIoStdlib)
     h = h !& hash(EmbeddedMvnHttpStdlib)
@@ -49,6 +51,7 @@ when defined(releaseCompiler):
       (result / "src" / "core.nim", EmbeddedCore),
       (result / "src" / "namespaces.nim", EmbeddedNamespaces),
       (result / "src" / "reader.nim", EmbeddedReader),
+      (result / "src" / "runtime_lib.nim", EmbeddedRuntimeLib),
       (result / "stdlib" / "clonim" / "core.clj", EmbeddedCoreStdlib),
       (result / "stdlib" / "clojure" / "java" / "io.clj", EmbeddedJavaIoStdlib),
       (result / "stdlib" / "jolt" / "mvn_http.clj", EmbeddedMvnHttpStdlib),
@@ -199,16 +202,27 @@ proc main() =
   for ch in stem:
     modName.add (if ch in {'a'..'z', 'A'..'Z', '0'..'9'}: ch else: '_')
   if modName.len == 0 or modName[0] in {'0'..'9'}: modName = "m" & modName
+  let pathKey = toHex(hash(file.absolutePath).uint32, 8)
   # The nimcache is persistent and keyed by the source file's absolute path, so
   # repeated `clonim run` on the same file reuses the compiled runtime/core and
   # the Nim stdlib instead of rebuilding them from scratch every time. The .nim
   # file lives in the same directory so its path stays stable across runs too —
   # Nim keys its cache entries on module paths.
   let work = getTempDir() / "clonim" /
-             (modName & "-" & toHex(hash(file.absolutePath).uint32, 8) &
-              (if release: "-r" else: ""))
+             (modName & "-" & pathKey & (if release: "-r" else: ""))
   createDir(work)
-  let nimFile = work / (modName & ".nim")
+  # The release compiler shares one nimcache between all programs, so the
+  # runtime's objects are compiled once rather than per program (see
+  # app_runtime_source.nim). The program's own module lands there too, so its
+  # name carries the path key to keep same-named files apart. Nim records its
+  # C compiler command, including -I<program dir>, in every C file it writes,
+  # so all programs also share one directory or no C file would ever match.
+  var nimcache = work / "cache"
+  var nimFile = work / (modName & ".nim")
+  when defined(releaseCompiler):
+    nimcache = srcDir().parentDir / "nimcache"
+    createDir(srcDir().parentDir / "programs")
+    nimFile = srcDir().parentDir / "programs" / (modName & "_" & pathKey & ".nim")
   writeFile(nimFile, nimSrc)
 
   if outBin.len == 0:
@@ -231,12 +245,16 @@ proc main() =
                readFile(stamp) == buildKey(nimSrc, release, rtLib)
 
   var nimCmd = @["nim", "c", "--hints:off", "--warnings:off",
-                 "--path:" & srcDir(), "--nimcache:" & (work / "cache"),
+                 "--path:" & srcDir(), "--nimcache:" & nimcache,
                  "-o:" & outBin]
   when not defined(releaseCompiler):
     nimCmd.add "--passL:-Wl,--allow-multiple-definition"
     nimCmd.add "--passL:" & rtLib
   nimCmd.add "--passL:-lm"
+  # Per-function sections let --gc-sections drop the runtime code a program
+  # never reaches; the shared runtime objects carry all of it.
+  nimCmd.add "--passC:-ffunction-sections"
+  nimCmd.add "--passC:-fdata-sections"
   nimCmd.add "--passL:-Wl,--gc-sections"
   nimCmd.add "-d:ssl"
   if release:
