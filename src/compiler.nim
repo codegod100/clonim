@@ -618,7 +618,10 @@ proc genLet(bindings: Value, body: seq[Value], dst: string, env: Env, c: Ctx) =
   let lenv = newEnv(env)
   var i = 0
   while i < bindings.items.len:
-    let v = genExpr(bindings.items[i + 1], lenv, c)
+    # A destructuring pattern reads its value once per element, so the value
+    # must be computed once into a local rather than inlined as an expression.
+    let v = (if bindings.items[i].kind == kSymbol: genExpr(bindings.items[i + 1], lenv, c)
+             else: genExprTemp(bindings.items[i + 1], lenv, c))
     bindPattern(bindings.items[i], v, lenv, c)
     i += 2
   genBody(body, dst, lenv, c)
