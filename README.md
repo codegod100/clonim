@@ -13,7 +13,14 @@ nim c --hints:off -o:bin/clonim src/clonim.nim   # build the compiler
 ./bin/clonim run   examples/tour.clj    # compile + run
 ./bin/clonim build examples/tour.clj    # native binary (-d:release)
 ./bin/clonim emit  examples/tour.clj    # show the generated Nim
+./bin/clonim repl                       # interactive REPL
 ```
+
+The REPL has no interpreter behind it: each input is compiled and run as a
+whole program made of every earlier successful input plus the new one, and
+only the new input's output and values are shown. Earlier inputs therefore run
+again on each evaluation (their output hidden), so side effects such as file
+writes repeat. An `ns` form is accepted only as the first input.
 
 There is a `justfile` too: `just build`, `just test`, `just bench`,
 `just run <file>`, `just emit <file>`, `just accept` (re-record expectations).

@@ -263,10 +263,16 @@ proc readOne*(src: string, tagFn: TagFn = nil, eof: Value = NilV,
     return eof
   r.readForm
 
-proc readAll*(src: string): seq[Value] =
+proc readAllSpans*(src: string): seq[(Value, Slice[int])] =
+  ## Every form in `src`, each with the source text range it was read from.
   var r = Reader(src: src, pos: 0, line: 1)
   result = @[]
   while true:
     r.skipWs
     if r.pos >= r.src.len: break
-    result.add r.readForm
+    let start = r.pos
+    let form = r.readForm
+    result.add (form, start ..< r.pos)
+
+proc readAll*(src: string): seq[Value] =
+  for (form, _) in readAllSpans(src): result.add form
