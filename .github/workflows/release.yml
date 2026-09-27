@@ -16,6 +16,9 @@ on:
 permissions:
   contents: write
 
+env:
+  NIM_VERSION: 2.2.12
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -72,7 +75,7 @@ jobs:
           curl --fail --show-error --silent \
             https://nim-lang.org/choosenim/init.sh \
             -o /tmp/choosenim-init.sh
-          CHOOSENIM_CHOOSE_VERSION=2.2.12 sh /tmp/choosenim-init.sh -y
+          CHOOSENIM_CHOOSE_VERSION="$NIM_VERSION" sh /tmp/choosenim-init.sh -y
           echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.nimble/bin:$PATH"
           nim --version
@@ -89,6 +92,19 @@ jobs:
         run: |
           nim c -d:release -d:releaseCompiler --hints:off --warnings:off \
             -o:bin/clonim src/clonim.nim
+
+      # The optimized compiler compiles the runtime from source once into a
+      # shared cache under /tmp/clonim-runtime, then reuses it for every
+      # program. Keep that cache between runs. The key covers everything that
+      # feeds the runtime's C: its sources, the stdlib, clonim.nim (C flags)
+      # and the Nim version. A new key starts a fresh cache rather than
+      # restoring an old one, because a changed runtime unpacks into a new
+      # directory and the old one would only add dead weight.
+      - name: Cache compiled runtime
+        uses: actions/cache@v4
+        with:
+          path: /tmp/clonim-runtime
+          key: clonim-runtime-${{ runner.os }}-nim${{ env.NIM_VERSION }}-${{ hashFiles('src/clonim.nim', 'src/app_runtime_source.nim', 'src/runtime_lib.nim', 'src/runtime_types.nim', 'src/runtime.nim', 'src/core.nim', 'src/namespaces.nim', 'src/reader.nim', 'stdlib/**') }}
 
       # The release compiler compiles generated programs against the runtime
       # sources it embeds rather than the private runtime archive, so test it
@@ -174,7 +190,7 @@ jobs:
             Linux x86_64 ${{ steps.release.outputs.tag == 'release' && format('development build of clonim from {0}', github.sha) || 'release of clonim' }}.
 
             Download the AppImage, make it executable, and run it. It contains
-            clonim, Nim 2.2.12, Zig 0.15.2 as its C compiler/linker, and clonim's
+            clonim, Nim ${{ env.NIM_VERSION }}, Zig 0.15.2 as its C compiler/linker, and clonim's
             private static runtime. It has no external build dependencies, and
             generated programs statically link the clonim runtime.
 

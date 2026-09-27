@@ -18,6 +18,7 @@ const
   BuildSha = (if ClonimSha.len > 0: ClonimSha else: gitSha())
 
 when defined(releaseCompiler):
+  # The release workflow's runtime cache key lists these files; keep it in step.
   const
     EmbeddedAppRuntime = staticRead("app_runtime_source.nim")
     EmbeddedRuntimeTypes = staticRead("runtime_types.nim")
