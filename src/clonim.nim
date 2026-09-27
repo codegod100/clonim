@@ -56,7 +56,10 @@ when defined(releaseCompiler):
     for (path, contents) in files:
       createDir(path.parentDir)
       if not fileExists(path) or readFile(path) != contents:
-        writeFile(path, contents)
+        # Write then rename, so a concurrent clonim never reads a partial file.
+        let tmp = path & "." & $getCurrentProcessId() & ".tmp"
+        writeFile(tmp, contents)
+        moveFile(tmp, path)
 
 proc usage() =
   echo """clonim — a Clojure compiler hosted on Nim
