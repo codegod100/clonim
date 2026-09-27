@@ -26,17 +26,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # Every push to main publishes a new version: the version in
-      # clonim.nimble if it has no tag yet, otherwise the next patch after the
-      # highest tag in that major.minor series. Bump clonim.nimble to start a
-      # new minor or major series. Pushing a v* tag, or dispatching with one,
-      # publishes that tag as is.
-      - name: Check out release ref
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.sha }}
-          fetch-depth: 0
-
+      # Pushes to main publish a rolling "release" prerelease; version tags
+      # publish a regular release. Each AppImage updates from its own channel.
       - name: Resolve release tag
         id: release
         env:
@@ -44,35 +35,37 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
         run: |
           if [[ "$EVENT_NAME" == "push" && "$REF_TYPE" == "branch" ]]; then
-            base=$(sed -n 's/^version *= *"\(.*\)"/\1/p' clonim.nimble)
-            if [[ ! "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "clonim.nimble version must be MAJOR.MINOR.PATCH, got '$base'" >&2
-              exit 1
-            fi
-            if git rev-parse -q --verify "refs/tags/v$base" >/dev/null; then
-              series="${base%.*}"
-              last=$(git tag --list "v$series.*" | sed "s/^v$series\.//" \
-                | grep -E '^[0-9]+$' | sort -n | tail -n 1)
-              tag="v$series.$((last + 1))"
-            else
-              tag="v$base"
-            fi
-            echo "create=true" >> "$GITHUB_OUTPUT"
-          else
-            if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-              tag="$INPUT_TAG"
-            else
-              tag="$REF_NAME"
-            fi
-            if [[ ! "$tag" =~ ^v[0-9] ]]; then
-              echo "Release tags must start with a version such as v0.1.0" >&2
-              exit 1
-            fi
+            {
+              echo "tag=release"
+              echo "ref=$SHA"
+              echo "channel=release"
+              echo "prerelease=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "Releasing $tag"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9] ]]; then
+            echo "Release tags must start with a version such as v0.1.0" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "ref=$tag"
+            echo "channel=latest"
+            echo "prerelease=false"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.ref }}
 
       - name: Install Nim
         run: |
@@ -104,6 +97,8 @@ jobs:
         run: CLONIM=bin/clonim ./run-tests.sh
 
       - name: Package release
+        env:
+          UPDATE_CHANNEL: ${{ steps.release.outputs.channel }}
         run: |
           appdir=dist/clonim.AppDir
           install -Dm755 bin/clonim "$appdir/usr/bin/clonim"
@@ -142,9 +137,9 @@ jobs:
             | sha256sum --check
           chmod +x /tmp/appimagetool-x86_64.AppImage
           # Embed update information so AppImageUpdate can fetch deltas from
-          # the newest release. appimagetool writes
+          # the newest release on this build's channel. appimagetool writes
           # the .zsync file to the working directory, so run it from dist/.
-          update_info="gh-releases-zsync|${GITHUB_REPOSITORY_OWNER}|${GITHUB_REPOSITORY#*/}|latest|clonim-linux-x86_64.AppImage.zsync"
+          update_info="gh-releases-zsync|${GITHUB_REPOSITORY_OWNER}|${GITHUB_REPOSITORY#*/}|${UPDATE_CHANNEL}|clonim-linux-x86_64.AppImage.zsync"
           (
             cd dist
             ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 \
@@ -164,21 +159,19 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Create version tag
-        if: steps.release.outputs.create == 'true'
-        env:
-          TAG: ${{ steps.release.outputs.tag }}
+      - name: Move release tag to this commit
+        if: steps.release.outputs.tag == 'release'
         run: |
-          git tag "$TAG" "$GITHUB_SHA"
-          git push origin "refs/tags/$TAG"
+          git tag --force release "$GITHUB_SHA"
+          git push --force origin refs/tags/release
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
-          name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.tag == 'release' && 'Latest build from main' || steps.release.outputs.tag }}
           body: |
-            Linux x86_64 release of clonim, built from ${{ github.sha }}.
+            Linux x86_64 ${{ steps.release.outputs.tag == 'release' && format('development build of clonim from {0}', github.sha) || 'release of clonim' }}.
 
             Download the AppImage, make it executable, and run it. It contains
             clonim, Nim 2.2.12, Zig 0.15.2 as its C compiler/linker, and clonim's
@@ -188,8 +181,8 @@ jobs:
             The AppImage embeds update information, so it can be updated in
             place with AppImageUpdate (`appimageupdatetool clonim-linux-x86_64.AppImage`).
           draft: false
-          prerelease: false
-          make_latest: true
+          prerelease: ${{ steps.release.outputs.prerelease }}
+          make_latest: ${{ steps.release.outputs.prerelease == 'true' && 'false' || 'true' }}
           files: |
             dist/clonim-linux-x86_64.AppImage
             dist/clonim-linux-x86_64.AppImage.zsync
