@@ -28,3 +28,5 @@
 (def n (atom 0))
 (while (< @n 3) (swap! n inc))
 (prn @n)
+(prn (binding [*data-readers* {'my/tag (fn [v] (* 2 v))}] (read-string "[#my/tag 21]")))
+(prn (binding [*default-data-reader-fn* (fn [t v] [t v])] (read-string "#x/y 1")))

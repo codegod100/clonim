@@ -932,6 +932,8 @@ proc exInfo(msg: string, data: Value): Value =
     mkFn("getMessage", proc (a: openArray[Value]): Value = msgV))
   methods = mapAssoc(methods, mkStr("getData"),
     mkFn("getData", proc (a: openArray[Value]): Value = dataV))
+  methods = mapAssoc(methods, mkStr("getCause"),
+    mkFn("getCause", proc (a: openArray[Value]): Value = NilV))
   methods = mapAssoc(methods, mkStr("toString"),
     mkFn("toString", proc (a: openArray[Value]): Value =
       mkStr("clojure.lang.ExceptionInfo: " & msg & " " & prStr(dataV))))
@@ -1079,6 +1081,15 @@ proc registerCoreData() =
       let y = call(a[0], [x])
       if y.kind != kNil: r.add y
     mkList(r)
+  def "keep-indexed", proc (a: openArray[Value]): Value =
+    var r: seq[Value] = @[]
+    var i = 0
+    for x in elems(a[1]):
+      let y = call(a[0], [mkInt(i), x])
+      if y.kind != kNil: r.add y
+      inc i
+    mkList(r)
+  def "shutdown-agents", proc (a: openArray[Value]): Value = NilV
   def "max-key", proc (a: openArray[Value]): Value =
     result = a[1]
     var best = num(call(a[0], [a[1]]))
@@ -1264,9 +1275,17 @@ proc registerCoreData() =
     if not validUuid(sOf(a[0])): err("Invalid UUID string: " & sOf(a[0]))
     mkUuid(sOf(a[0]))
   # ---- reading data
+  def "*data-readers*", mkMapOf(emptyPMap())
+  def "*default-data-reader-fn*", NilV
   def "read-string", proc (a: openArray[Value]): Value =
-    if a.len > 1: readOne(sOf(a[1]), ednTagFn(a[0]))
-    else: readOne(sOf(a[0]))
+    ## Tags resolve through *data-readers* and *default-data-reader-fn*, which
+    ## a program can set with binding, as on the JVM.
+    if a.len > 1: return readOne(sOf(a[1]), ednTagFn(a[0]))
+    let readers = (if hasVar("*data-readers*"): getVar("*data-readers*") else: NilV)
+    let dflt = (if hasVar("*default-data-reader-fn*"): getVar("*default-data-reader-fn*")
+                else: NilV)
+    readOne(sOf(a[0]), ednTagFn(mkMap(@[(mkKeyword("readers"), readers),
+                                        (mkKeyword("default"), dflt)])))
   def "clojure.edn/read-string", proc (a: openArray[Value]): Value =
     let opts = (if a.len > 1: a[0] else: NilV)
     let src = (if a.len > 1: a[1] else: a[0])
