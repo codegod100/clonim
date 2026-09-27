@@ -3,8 +3,19 @@
 ##   clonim run   foo.clj          compile and run
 ##   clonim build foo.clj [-o bin] compile to a native binary
 ##   clonim emit  foo.clj          print the generated Nim
+##   clonim version                print the git SHA this binary was built from
 import std/[hashes, os, osproc, sequtils, strutils, times]
 import runtime, compiler
+
+proc gitSha(): string {.compileTime.} =
+  let (sha, code) = gorgeEx("git -C " & quoteShell(currentSourcePath().parentDir) &
+                            " rev-parse HEAD")
+  if code == 0: sha.strip else: "unknown"
+
+const
+  ClonimSha {.strdefine.} = ""
+    ## Override with -d:ClonimSha=<sha> when building outside a git checkout.
+  BuildSha = (if ClonimSha.len > 0: ClonimSha else: gitSha())
 
 when defined(releaseCompiler):
   const
@@ -54,6 +65,7 @@ usage:
   clonim run   <file.clj>              compile to Nim, build, and run
   clonim build <file.clj> [-o <bin>]   build a native binary
   clonim emit  <file.clj>              print the generated Nim source
+  clonim version                       print the git SHA of this build
 
 options:
   -o <path>   output binary path (build)
@@ -127,6 +139,9 @@ proc buildKey(nimSrc: string, release: bool, rtLib: string): string =
 
 proc main() =
   let argv = commandLineParams()
+  if argv.len >= 1 and argv[0] in ["version", "--version"]:
+    echo BuildSha
+    quit(0)
   if argv.len < 2: usage()
   let cmd = argv[0]
   let file = argv[1]
