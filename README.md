@@ -23,18 +23,19 @@ and flags slowdowns above 10% versus the latest compatible run. Requires Jolt
 and a clean working tree. Use `just bench-store 15` to change the threshold;
 see [benchmark history](bench/README.md) for metrics and exit codes.
 
-`just release` builds the compiler and its private static runtime. Version tags
-matching `v*` trigger the release workflow, which packages both into a single
+`just release` builds the compiler and its private static runtime. Every push
+to `main` triggers the release workflow, which packages both into a single
 Linux x86_64 AppImage together with Nim 2.2.12 and Zig 0.15.2 as the private C
 compiler/linker. The AppImage has no external build dependencies. Generated
 programs statically link the clonim runtime and are standalone.
-Every push to `main` also builds the AppImage and publishes it to a rolling
-`continuous` prerelease. Each release also publishes a `.zsync` file, and the
+Each push to `main` is tagged and released as the next patch version after the
+highest `v*` tag in the series named by `clonim.nimble`'s version; bump that
+version to start a new minor or major series. Each release also publishes a `.zsync` file, and the
 AppImage embeds matching update information, so an installed copy can be
 updated in place with
 [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate)
-(`appimageupdatetool clonim-linux-x86_64.AppImage`). Tagged builds update to the
-latest tagged release; `continuous` builds update to the newest `main` build.
+(`appimageupdatetool clonim-linux-x86_64.AppImage`), which moves it to the
+latest release.
 
 Source-level libraries are loaded explicitly. Use
 `(require '[clonim.core :refer [now-ms]])` to load `stdlib/clonim/core.clj`. Host-dependent operations remain small runtime primitives; for
