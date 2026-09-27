@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -24,13 +26,26 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+      # Pushes to main publish a rolling "continuous" prerelease; version tags
+      # publish a regular release. Each AppImage updates from its own channel.
       - name: Resolve release tag
         id: release
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
         run: |
+          if [[ "$EVENT_NAME" == "push" && "$REF_TYPE" == "branch" ]]; then
+            {
+              echo "tag=continuous"
+              echo "ref=$SHA"
+              echo "channel=continuous"
+              echo "prerelease=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             tag="$INPUT_TAG"
           else
@@ -40,12 +55,17 @@ jobs:
             echo "Release tags must start with a version such as v0.1.0" >&2
             exit 1
           fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$tag"
+            echo "ref=$tag"
+            echo "channel=latest"
+            echo "prerelease=false"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Check out release tag
+      - name: Check out release ref
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.release.outputs.tag }}
+          ref: ${{ steps.release.outputs.ref }}
 
       - name: Install Nim
         run: |
@@ -71,6 +91,8 @@ jobs:
             -o:bin/clonim src/clonim.nim
 
       - name: Package release
+        env:
+          UPDATE_CHANNEL: ${{ steps.release.outputs.channel }}
         run: |
           appdir=dist/clonim.AppDir
           install -Dm755 bin/clonim "$appdir/usr/bin/clonim"
@@ -109,9 +131,9 @@ jobs:
             | sha256sum --check
           chmod +x /tmp/appimagetool-x86_64.AppImage
           # Embed update information so AppImageUpdate can fetch deltas from
-          # the latest GitHub release. appimagetool writes the .zsync file to
-          # the working directory, so run it from dist/.
-          update_info="gh-releases-zsync|${GITHUB_REPOSITORY_OWNER}|${GITHUB_REPOSITORY#*/}|latest|clonim-linux-x86_64.AppImage.zsync"
+          # the newest release on this build's channel. appimagetool writes
+          # the .zsync file to the working directory, so run it from dist/.
+          update_info="gh-releases-zsync|${GITHUB_REPOSITORY_OWNER}|${GITHUB_REPOSITORY#*/}|${UPDATE_CHANNEL}|clonim-linux-x86_64.AppImage.zsync"
           (
             cd dist
             ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 \
@@ -131,13 +153,19 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Publish Rickub release
+      - name: Move continuous tag to this commit
+        if: steps.release.outputs.tag == 'continuous'
+        run: |
+          git tag --force continuous "$GITHUB_SHA"
+          git push --force origin refs/tags/continuous
+
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
-          name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.tag == 'continuous' && 'Continuous build' || steps.release.outputs.tag }}
           body: |
-            Linux x86_64 release of clonim.
+            Linux x86_64 ${{ steps.release.outputs.tag == 'continuous' && format('development build of clonim from {0}', github.sha) || 'release of clonim' }}.
 
             Download the AppImage, make it executable, and run it. It contains
             clonim, Nim 2.2.12, Zig 0.15.2 as its C compiler/linker, and clonim's
@@ -147,7 +175,8 @@ jobs:
             The AppImage embeds update information, so it can be updated in
             place with AppImageUpdate (`appimageupdatetool clonim-linux-x86_64.AppImage`).
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.release.outputs.prerelease }}
+          make_latest: ${{ steps.release.outputs.prerelease == 'true' && 'false' || 'true' }}
           files: |
             dist/clonim-linux-x86_64.AppImage
             dist/clonim-linux-x86_64.AppImage.zsync
