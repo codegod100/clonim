@@ -15,6 +15,8 @@ when defined(releaseCompiler):
     EmbeddedNamespaces = staticRead("namespaces.nim")
     EmbeddedReader = staticRead("reader.nim")
     EmbeddedCoreStdlib = staticRead("../stdlib/clonim/core.clj")
+    EmbeddedJavaIoStdlib = staticRead("../stdlib/clojure/java/io.clj")
+    EmbeddedMvnHttpStdlib = staticRead("../stdlib/jolt/mvn_http.clj")
 
   proc embeddedRoot(): string =
     ## Materialize the compiler-only inputs under a content-keyed cache. The
@@ -26,6 +28,8 @@ when defined(releaseCompiler):
     h = h !& hash(EmbeddedNamespaces)
     h = h !& hash(EmbeddedReader)
     h = h !& hash(EmbeddedCoreStdlib)
+    h = h !& hash(EmbeddedJavaIoStdlib)
+    h = h !& hash(EmbeddedMvnHttpStdlib)
     result = getTempDir() / "clonim-runtime" / $(!$h)
     let files = [
       (result / "src" / "app_runtime.nim", EmbeddedAppRuntime),
@@ -35,6 +39,8 @@ when defined(releaseCompiler):
       (result / "src" / "namespaces.nim", EmbeddedNamespaces),
       (result / "src" / "reader.nim", EmbeddedReader),
       (result / "stdlib" / "clonim" / "core.clj", EmbeddedCoreStdlib),
+      (result / "stdlib" / "clojure" / "java" / "io.clj", EmbeddedJavaIoStdlib),
+      (result / "stdlib" / "jolt" / "mvn_http.clj", EmbeddedMvnHttpStdlib),
     ]
     for (path, contents) in files:
       createDir(path.parentDir)

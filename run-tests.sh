@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # Compile and run every example, diffing against tests/<name>.expected
+#
+#   ./run-tests.sh                      # build bin/clonim from source first
+#   CLONIM=bin/clonim ./run-tests.sh    # test an already built compiler
 set -u
 cd "$(dirname "$0")"
-nim c --hints:off --warnings:off -o:bin/clonim src/clonim.nim || exit 1
+clonim="${CLONIM:-}"
+if [ -z "$clonim" ]; then
+  nim c --hints:off --warnings:off -o:bin/clonim src/clonim.nim || exit 1
+  clonim=./bin/clonim
+fi
 fail=0
 for f in examples/*.clj; do
   name=$(basename "$f" .clj)
   exp="tests/$name.expected"
   [ -f "$exp" ] || continue
-  got=$(./bin/clonim run "$f" 2>&1)
+  got=$("$clonim" run "$f" 2>&1)
   if [ "$got" = "$(cat "$exp")" ]; then
     echo "ok   $name"
   else
