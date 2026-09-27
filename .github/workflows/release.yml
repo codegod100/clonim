@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # Pushes to main publish a rolling "continuous" prerelease; version tags
+      # Pushes to main publish a rolling "release" prerelease; version tags
       # publish a regular release. Each AppImage updates from its own channel.
       - name: Resolve release tag
         id: release
@@ -39,9 +39,9 @@ jobs:
         run: |
           if [[ "$EVENT_NAME" == "push" && "$REF_TYPE" == "branch" ]]; then
             {
-              echo "tag=continuous"
+              echo "tag=release"
               echo "ref=$SHA"
-              echo "channel=continuous"
+              echo "channel=release"
               echo "prerelease=true"
             } >> "$GITHUB_OUTPUT"
             exit 0
@@ -159,19 +159,19 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Move continuous tag to this commit
-        if: steps.release.outputs.tag == 'continuous'
+      - name: Move release tag to this commit
+        if: steps.release.outputs.tag == 'release'
         run: |
-          git tag --force continuous "$GITHUB_SHA"
-          git push --force origin refs/tags/continuous
+          git tag --force release "$GITHUB_SHA"
+          git push --force origin refs/tags/release
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
-          name: ${{ steps.release.outputs.tag == 'continuous' && 'Continuous build' || steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.tag == 'release' && 'Latest build from main' || steps.release.outputs.tag }}
           body: |
-            Linux x86_64 ${{ steps.release.outputs.tag == 'continuous' && format('development build of clonim from {0}', github.sha) || 'release of clonim' }}.
+            Linux x86_64 ${{ steps.release.outputs.tag == 'release' && format('development build of clonim from {0}', github.sha) || 'release of clonim' }}.
 
             Download the AppImage, make it executable, and run it. It contains
             clonim, Nim 2.2.12, Zig 0.15.2 as its C compiler/linker, and clonim's

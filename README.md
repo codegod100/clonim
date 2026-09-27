@@ -29,12 +29,12 @@ Linux x86_64 AppImage together with Nim 2.2.12 and Zig 0.15.2 as the private C
 compiler/linker. The AppImage has no external build dependencies. Generated
 programs statically link the clonim runtime and are standalone.
 Every push to `main` also builds the AppImage and publishes it to a rolling
-`continuous` prerelease. Each release also publishes a `.zsync` file, and the
+`release` prerelease. Each release also publishes a `.zsync` file, and the
 AppImage embeds matching update information, so an installed copy can be
 updated in place with
 [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate)
 (`appimageupdatetool clonim-linux-x86_64.AppImage`). Tagged builds update to the
-latest tagged release; `continuous` builds update to the newest `main` build.
+latest tagged release; `release` builds update to the newest `main` build.
 
 Source-level libraries are loaded explicitly. Use
 `(require '[clonim.core :refer [now-ms]])` to load `stdlib/clonim/core.clj`. Host-dependent operations remain small runtime primitives; for
