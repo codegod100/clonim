@@ -90,6 +90,12 @@ jobs:
           nim c -d:release -d:releaseCompiler --hints:off --warnings:off \
             -o:bin/clonim src/clonim.nim
 
+      # The release compiler compiles generated programs against the runtime
+      # sources it embeds rather than the private runtime archive, so test it
+      # separately from the source-built compiler above.
+      - name: Run test suite with optimized compiler
+        run: CLONIM=bin/clonim ./run-tests.sh
+
       - name: Package release
         env:
           UPDATE_CHANNEL: ${{ steps.release.outputs.channel }}
