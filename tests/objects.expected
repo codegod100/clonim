@@ -1,0 +1,5 @@
+6 24 Rect 2x3 true Rect 20x30
+"a" "b" :none 0 (:a :b) ("a" "b") 2 true false 2
+{:a "a", :b "b"} (:a :b)
+42 42
+6 Rect 6x9

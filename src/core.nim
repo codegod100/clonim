@@ -1245,12 +1245,12 @@ proc registerCoreData() =
     let hasEof = opts.kind == kMap and mapContains(opts.m, mkKeyword("eof"))
     readOne(sOf(src), ednTagFn(opts), eofV, not hasEof)
   # ---- objects
-  def "clonim.core/make-object", proc (a: openArray[Value]): Value =
+  def "clonim.rt/make-object", proc (a: openArray[Value]): Value =
     mkObject(sOf(a[0]), a[1])
-  def "clonim.core/invoke-method", proc (a: openArray[Value]): Value =
+  def "clonim.rt/invoke-method", proc (a: openArray[Value]): Value =
     ## (. obj method args...) on a reify/deftype instance.
     objCall(a[0], sOf(a[1]), a[2 .. ^1])
-  def "clonim.core/object-type", proc (a: openArray[Value]): Value =
+  def "clonim.rt/object-type", proc (a: openArray[Value]): Value =
     (if a[0].kind == kObject: mkStr(a[0].obj.otype) else: NilV)
 
 proc registerCoreCollections*() =

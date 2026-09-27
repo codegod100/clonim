@@ -26,12 +26,14 @@ type
     macros: Table[string, MacroDef]
     output: seq[Value]
     gensym: int
+    types: HashSet[string]     ## deftype names, qualified, for `Name.` calls
 
 const syntaxHeads = ["quote", "if", "do", "let", "let*", "loop", "loop*",
   "recur", "fn", "fn*", "def", "defn", "defn-", "defmacro", "and", "or",
   "when", "when-not", "if-not", "cond", "when-let", "if-let", "->", "->>",
   "doseq", "dotimes", "try", "catch", "finally", "comment", "set!", "declare",
-  "case", "for", "with-open", "assert", "binding"]
+  "case", "for", "with-open", "assert", "binding", "reify", "deftype",
+  "defprotocol", "."]
 
 # Unlike macros, these heads cannot be shadowed in operator position.
 const specialForms = ["quote", "if", "do", "let*", "loop*", "recur", "fn*",
@@ -159,6 +161,27 @@ proc define(ns: Namespace, v: Value, private = false): Value =
   result = mkSymbol(ns.name & "/" & name)
 
 proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value
+
+proc methodTable(specs: seq[Value]): Value =
+  ## The method map of a reify/deftype body: interface and protocol names are
+  ## markers only, and every (name [this ...] body) clause becomes an arity of
+  ## the fn stored under "name". Dispatch is by method name at runtime.
+  var order: seq[string] = @[]
+  var arities = initTable[string, seq[Value]]()
+  for spec in specs:
+    if spec.kind == kSymbol: continue
+    if spec.kind != kList or spec.items.len < 2 or spec.items[0].kind != kSymbol or
+       spec.items[1].kind != kVector:
+      fail("invalid method implementation: " & prStr(spec))
+    let name = spec.items[0].s
+    if name notin arities:
+      order.add name
+      arities[name] = @[]
+    arities[name].add mkList(spec.items[1 .. ^1])
+  var ps: seq[(Value, Value)] = @[]
+  for name in order:
+    ps.add (mkStr(name), mkList(@[mkSymbol("fn")] & arities[name]))
+  mkMap(ps)
 
 proc macroKey(r: Resolver, ns: Namespace, raw: string): string =
   let slash = raw.find('/')
@@ -343,6 +366,18 @@ proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value 
   var xs = v.items
   if xs.len == 0: return v
   if xs[0].kind == kSymbol and xs[0].s notin locals:
+    let head = xs[0].s
+    if head.len > 1 and head[0] == '.' and head != ".." and head notin r.cores and
+       head notin r.hosts:
+      # (.method obj args...) on a reify/deftype instance
+      if xs.len < 2: fail("method call requires a target: " & prStr(v))
+      return r.walk(ns, mkList(@[mkSymbol("clonim.rt/invoke-method"), xs[1],
+                                 mkStr(head[1 .. ^1])] & xs[2 .. ^1]), locals)
+    if head.len > 1 and head[^1] == '.' and head[0] != '.' and
+       (ns.name & "/" & head[0 ..< head.len - 1]) in r.types:
+      # (Name. fields...) constructs a deftype
+      return r.walk(ns, mkList(@[mkSymbol("->" & head[0 ..< head.len - 1])] &
+                               xs[1 .. ^1]), locals)
     let (isMacro, expanded) = r.expandMacro(ns, v, locals)
     if isMacro: return r.walk(ns, expanded, locals)
   let h = ns.syntaxHead(v, locals)
@@ -353,6 +388,48 @@ proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value 
     fail(h & " is only supported as a static top-level ns/require declaration")
   if h in syntaxHeads: xs[0] = mkSymbol(h)
   case h
+  of ".":
+    # (. obj method args...) or (. obj (method args...))
+    if xs.len < 3: fail(". requires a target and a method")
+    var meth = xs[2]
+    var args = xs[3 .. ^1]
+    if meth.kind == kList and meth.items.len > 0:
+      args = meth.items[1 .. ^1]
+      meth = meth.items[0]
+    if meth.kind != kSymbol: fail(". requires a method name")
+    return r.walk(ns, mkList(@[mkSymbol("clonim.rt/invoke-method"), xs[1],
+                               mkStr(meth.s)] & args), locals)
+  of "reify":
+    return r.walk(ns, mkList(@[mkSymbol("clonim.rt/make-object"), mkStr("reify"),
+                               methodTable(xs[1 .. ^1])]), locals)
+  of "deftype":
+    # (deftype Name [fields] Iface (method [this ...] ...) ...): a constructor
+    # whose methods close over the fields, plus a var naming the type.
+    if xs.len < 3 or xs[1].kind != kSymbol or xs[2].kind != kVector:
+      fail("deftype requires a name and a field vector")
+    let tname = simple(xs[1], "type name")
+    let qualified = ns.name & "." & tname
+    r.types.incl ns.name & "/" & tname
+    let ctor = mkList(@[mkSymbol("defn"), mkSymbol("->" & tname), xs[2],
+      mkList(@[mkSymbol("clonim.rt/make-object"), mkStr(qualified),
+               methodTable(xs[3 .. ^1])])])
+    let tvar = mkList(@[mkSymbol("def"), xs[1], mkStr(qualified)])
+    return mkList(@[mkSymbol("do"), r.walk(ns, tvar, locals),
+                    r.walk(ns, ctor, locals)])
+  of "defprotocol":
+    # Each signature becomes a fn that dispatches on its first argument's
+    # methods, which is what a deftype or reify implementing it provides.
+    if xs.len < 2: fail("defprotocol requires a name")
+    var forms: seq[Value] = @[mkSymbol("do"),
+      r.walk(ns, mkList(@[mkSymbol("def"), xs[1], mkStr(ns.name & "." & xs[1].s)]), locals)]
+    for sig in xs[2 .. ^1]:
+      if sig.kind != kList or sig.items.len == 0: continue
+      let mname = simple(sig.items[0], "protocol method")
+      forms.add r.walk(ns, mkList(@[mkSymbol("defn"), sig.items[0],
+        mkVector(@[mkSymbol("this"), mkSymbol("&"), mkSymbol("args")]),
+        mkList(@[mkSymbol("apply"), mkSymbol("clonim.rt/invoke-method"),
+                 mkSymbol("this"), mkStr(mname), mkSymbol("args")])]), locals)
+    return mkList(forms)
   of "fn", "fn*":
     var scope = locals
     var start = 1
@@ -391,11 +468,68 @@ proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value 
       xs[i] = ns.define(xs[i])
     for i in stop ..< xs.len: xs[i] = r.walk(ns, xs[i], locals)
     return mkList(xs)
-  of "let", "let*", "loop", "loop*", "when-let", "if-let", "doseq", "dotimes":
+  of "doseq":
+    # Nested bindings, modifiers and destructuring become nested single-symbol
+    # doseqs, which is the only shape the code generator handles.
+    if xs.len < 2 or xs[1].kind != kVector or xs[1].items.len mod 2 != 0:
+      fail("doseq requires paired bindings")
+    let bs = xs[1].items
+    if bs.len != 2 or bs[0].kind != kSymbol:
+      proc nest(i: int): Value =
+        if i >= bs.len: return mkList(@[mkSymbol("do")] & xs[2 .. ^1])
+        let target = bs[i]
+        if target.kind == kKeyword:
+          case target.s
+          of "when": return mkList(@[mkSymbol("when"), bs[i + 1], nest(i + 2)])
+          of "let": return mkList(@[mkSymbol("let"), bs[i + 1], nest(i + 2)])
+          else: fail("unsupported doseq modifier: :" & target.s)
+        var coll = bs[i + 1]
+        var j = i + 2
+        # :while belongs to the binding it follows: stop that level's walk.
+        while j < bs.len and bs[j].kind == kKeyword and bs[j].s == "while":
+          coll = mkList(@[mkSymbol("take-while"),
+                          mkList(@[mkSymbol("fn"), mkVector(@[target]), bs[j + 1]]), coll])
+          j += 2
+        if target.kind == kSymbol:
+          return mkList(@[mkSymbol("doseq"), mkVector(@[target, coll]), nest(j)])
+        inc r.gensym
+        let g = mkSymbol("seq__" & $r.gensym)
+        mkList(@[mkSymbol("doseq"), mkVector(@[g, coll]),
+                 mkList(@[mkSymbol("let"), mkVector(@[target, g]), nest(j)])])
+      return r.walk(ns, nest(0), locals)
+    var scope = locals
+    var bs2 = bs
+    bs2[1] = r.walk(ns, bs2[1], scope)
+    bindNames(bs[0], scope)
+    xs[1] = mkVector(bs2)
+    for j in 2 ..< xs.len: xs[j] = r.walk(ns, xs[j], scope)
+    return mkList(xs)
+  of "when-let", "if-let":
+    if xs.len < 3 or xs[1].kind != kVector or xs[1].items.len != 2:
+      fail(h & " requires exactly one binding")
+    let target = xs[1].items[0]
+    if target.kind != kSymbol:
+      # (when-let [[a b] x] ...) tests x, then destructures it
+      inc r.gensym
+      let g = mkSymbol("test__" & $r.gensym)
+      var form = @[xs[0], mkVector(@[g, xs[1].items[1]]),
+                   mkList(@[mkSymbol("let"), mkVector(@[target, g])] &
+                          (if h == "when-let": xs[2 .. ^1] else: @[xs[2]]))]
+      if h == "if-let" and xs.len > 3: form.add xs[3]
+      return r.walk(ns, mkList(form), locals)
+    var scope = locals
+    var bs = xs[1].items
+    bs[1] = r.walk(ns, bs[1], scope)
+    scope.incl simple(target, "local binding")
+    xs[1] = mkVector(bs)
+    for j in 2 ..< xs.len:
+      xs[j] = r.walk(ns, xs[j], if h == "if-let" and j >= 3: locals else: scope)
+    return mkList(xs)
+  of "let", "let*", "loop", "loop*", "dotimes":
     if xs.len < 2 or xs[1].kind != kVector: fail(h & " requires bindings")
     var bs = xs[1].items
     if bs.len mod 2 != 0: fail(h & " requires paired bindings")
-    if h in ["when-let", "if-let", "doseq", "dotimes"] and bs.len != 2:
+    if h == "dotimes" and bs.len != 2:
       fail(h & " supports exactly one binding")
     var scope = locals
     var i = 0
@@ -445,12 +579,35 @@ proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value 
     return r.walk(ns, mkList(@[mkSymbol("let"), mkVector(@[sym, xs[1]]),
                                mkList(@[mkSymbol("cond")] & clauses)]), locals)
   of "for":
-    # A comprehension over one or more bindings, without the modifier clauses.
     if xs.len < 3 or xs[1].kind != kVector: fail("for requires [sym coll] bindings")
     var bs = xs[1].items
     if bs.len == 0 or bs.len mod 2 != 0: fail("for requires paired bindings")
+    var modifiers = false
     for j in countup(0, bs.len - 1, 2):
-      if bs[j].kind == kKeyword: fail("for modifier clauses are not supported: " & prStr(bs[j]))
+      if bs[j].kind == kKeyword: modifiers = true
+    if modifiers:
+      # :when, :let and :while: each binding level is a mapcat whose innermost
+      # body yields a one-element list, or nothing when a :when fails.
+      proc level(i: int): Value =
+        if i >= bs.len:
+          return mkList(@[mkSymbol("list"), mkList(@[mkSymbol("do")] & xs[2 .. ^1])])
+        let target = bs[i]
+        if target.kind == kKeyword:
+          case target.s
+          of "when":
+            return mkList(@[mkSymbol("if"), bs[i + 1], level(i + 2),
+                            mkList(@[mkSymbol("list")])])
+          of "let": return mkList(@[mkSymbol("let"), bs[i + 1], level(i + 2)])
+          else: fail("unsupported for modifier: :" & target.s)
+        var coll = bs[i + 1]
+        var j = i + 2
+        while j < bs.len and bs[j].kind == kKeyword and bs[j].s == "while":
+          coll = mkList(@[mkSymbol("take-while"),
+                          mkList(@[mkSymbol("fn"), mkVector(@[target]), bs[j + 1]]), coll])
+          j += 2
+        mkList(@[mkSymbol("mapcat"),
+                 mkList(@[mkSymbol("fn"), mkVector(@[target]), level(j)]), coll])
+      return r.walk(ns, level(0), locals)
     var body = mkList(@[mkSymbol("do")] & xs[2 .. ^1])
     var j = bs.len - 2
     while j >= 0:
