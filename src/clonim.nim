@@ -3,9 +3,10 @@
 ##   clonim run   foo.clj          compile and run
 ##   clonim build foo.clj [-o bin] compile to a native binary
 ##   clonim emit  foo.clj          print the generated Nim
+##   clonim repl                   interactive read-eval-print loop
 ##   clonim version                print the git SHA this binary was built from
-import std/[hashes, os, osproc, sequtils, strutils, times]
-import runtime, compiler
+import std/[hashes, os, osproc, sequtils, strutils, terminal, times]
+import runtime, reader, compiler
 
 proc gitSha(): string {.compileTime.} =
   let (sha, code) = gorgeEx("git -C " & quoteShell(currentSourcePath().parentDir) &
@@ -102,13 +103,14 @@ usage:
   clonim run   <file.clj>              compile to Nim, build, and run
   clonim build <file.clj> [-o <bin>]   build a native binary
   clonim emit  <file.clj>              print the generated Nim source
+  clonim repl                          start an interactive REPL
   clonim version                       print the git SHA of this build
 
 options:
   -o <path>   output binary path (build)
   --source-path <path>  add a library source root (repeatable)
   -v          show the nim build command and timings
-  -d          build with -d:release (default for build, off for run)"""
+  -d          build with -d:release (default for build, off for run/repl)"""
   quit(1)
 
 proc srcDir(): string =
@@ -174,66 +176,21 @@ proc buildKey(nimSrc: string, release: bool, rtLib: string): string =
     h = h !& hash($getLastModificationTime(rtLib))
   $(!$h)
 
-proc main() =
-  let argv = commandLineParams()
-  if argv.len >= 1 and argv[0] in ["version", "--version"]:
-    echo BuildSha
-    quit(0)
-  if argv.len < 2: usage()
-  let cmd = argv[0]
-  let file = argv[1]
-  if not fileExists(file):
-    stderr.writeLine("clonim: no such file: " & file)
-    quit(1)
+type BuildError = object of CatchableError
+  output: string  ## what the Nim backend printed
 
-  var outBin = ""
-  var verbose = false
-  var release = cmd == "build"
-  when defined(releaseCompiler):
-    # The distributed compiler ships one release-mode runtime archive. Nim's
-    # debug and release modes are not ABI-compatible, so `run` uses it too.
-    release = true
-  var sourceRoots: seq[string] = @[]
-  var i = 2
-  while i < argv.len:
-    case argv[i]
-    of "-o":
-      inc i
-      if i >= argv.len: usage()
-      outBin = argv[i]
-    of "--source-path":
-      inc i
-      if i >= argv.len: usage()
-      sourceRoots.add argv[i].absolutePath
-    of "-v": verbose = true
-    of "-d": release = true
-    else: usage()
-    inc i
-
-  let t0 = epochTime()
-  var nimSrc = ""
-  try:
-    # Source-level libraries are loaded only by an explicit require form.
-    sourceRoots.add @[getCurrentDir(), file.absolutePath.parentDir,
-                      srcDir().parentDir / "stdlib"]
-    nimSrc = compileSource(readFile(file), sourceRoots)
-  except CljError, IOError, OSError:
-    stderr.writeLine("clonim: " & getCurrentExceptionMsg())
-    quit(1)
-  let tCompile = epochTime() - t0
-
-  if cmd == "emit":
-    stdout.write nimSrc
-    return
-
-  let stem = file.splitFile.name
+proc buildProgram(nimSrc, stem, keyPath: string, isRun, release, verbose: bool,
+                  outBin: string, tCompile: float): string =
+  ## Compiles generated Nim to a native binary and returns its path. `keyPath`
+  ## names the program's persistent work directory; `isRun` lets an unchanged
+  ## program reuse its last binary. Raises BuildError if the backend fails.
   # Nim module names must be identifiers, but .clj filenames are usually
   # hyphenated; the binary keeps the original stem, the module doesn't.
   var modName = ""
   for ch in stem:
     modName.add (if ch in {'a'..'z', 'A'..'Z', '0'..'9'}: ch else: '_')
   if modName.len == 0 or modName[0] in {'0'..'9'}: modName = "m" & modName
-  let pathKey = toHex(hash(file.absolutePath).uint32, 8)
+  let pathKey = toHex(hash(keyPath).uint32, 8)
   # The nimcache is persistent and keyed by the source file's absolute path, so
   # repeated `clonim run` on the same file reuses the compiled runtime/core and
   # the Nim stdlib instead of rebuilding them from scratch every time. The .nim
@@ -256,8 +213,9 @@ proc main() =
     nimFile = srcDir().parentDir / "programs" / (modName & "_" & pathKey & ".nim")
   writeFile(nimFile, nimSrc)
 
+  var outBin = outBin
   if outBin.len == 0:
-    outBin = (if cmd == "build": stem else: work / modName)
+    outBin = (if isRun: work / modName else: stem)
   outBin = outBin.absolutePath
 
   # Even a warm nimcache costs a second or so of semantic checking and linking.
@@ -267,12 +225,8 @@ proc main() =
   let stamp = work / "stamp"
   var rtLib = ""
   when not defined(releaseCompiler):
-    try:
-      rtLib = runtimeLib(release)
-    except IOError, OSError:
-      stderr.writeLine("clonim: " & getCurrentExceptionMsg())
-      quit(1)
-  let cached = cmd == "run" and fileExists(outBin) and fileExists(stamp) and
+    rtLib = runtimeLib(release)
+  let cached = isRun and fileExists(outBin) and fileExists(stamp) and
                readFile(stamp) == buildKey(nimSrc, release, rtLib)
 
   var nimCmd = @["nim", "c", "--hints:off", "--warnings:off",
@@ -303,24 +257,209 @@ proc main() =
   var code = 0
   if not cached:
     when defined(releaseCompiler):
-      try:
-        code = withRuntimeCache(nimcache, proc (): int =
-          (output, result) = execCmdEx(nimCmd.join(" ")))
-      except IOError, OSError:
-        stderr.writeLine("clonim: " & getCurrentExceptionMsg())
-        quit(1)
+      code = withRuntimeCache(nimcache, proc (): int =
+        (output, result) = execCmdEx(nimCmd.join(" ")))
     else:
       (output, code) = execCmdEx(nimCmd.join(" "))
     if code == 0: writeFile(stamp, buildKey(nimSrc, release, rtLib))
   let tBuild = epochTime() - t1
   if code != 0:
-    stderr.writeLine("clonim: Nim backend failed\n" & output)
-    stderr.writeLine("--- generated source ---\n" & nimSrc)
-    quit(1)
+    var e = newException(BuildError, "Nim backend failed")
+    e.output = output
+    raise e
   if verbose:
     echo "clonim: analyze ", (tCompile * 1000).formatFloat(ffDecimal, 1), "ms  ",
          "nim ", (tBuild * 1000).formatFloat(ffDecimal, 1), "ms",
          (if cached: " (cached)" else: "")
+  outBin
+
+proc headSymbol(form: Value): string =
+  ## The unqualified name at the head of a list form, or "".
+  if form.kind == kList and form.items.len > 0 and form.items[0].kind == kSymbol:
+    result = form.items[0].s
+    let slash = result.rfind('/')
+    if slash > 0: result = result[slash + 1 .. ^1]
+
+proc cljStr(s: string): string =
+  ## `s` as a Clojure string literal.
+  "\"" & s.multiReplace(("\\", "\\\\"), ("\"", "\\\"")) & "\""
+
+proc isDefinition(head: string): bool =
+  ## Forms that only make sense at top level, so the REPL cannot wrap them in
+  ## a `prn` of their value.
+  head.startsWith("def") or head in ["ns", "require", "declare", "extend-type",
+                                     "extend-protocol", "extend", "import"]
+
+proc repl(sourceRoots: seq[string], release, verbose: bool) =
+  ## clonim has no interpreter, so each input is compiled and run as a whole
+  ## program: every earlier successful input, a marker line, then the new
+  ## forms with each expression's value printed. Only output after the marker
+  ## is shown. Earlier inputs therefore run again on every evaluation, side
+  ## effects included; their output is hidden, but not their other effects.
+  let marker = "clonim-repl-" & $getCurrentProcessId() & "-" &
+               toHex(hash(epochTime()).uint32, 8)
+  let keyPath = getCurrentDir() / "<repl>"
+  var history: seq[string] = @[]
+  var ns = "user"
+  let interactive = isatty(stdin)
+  if interactive:
+    echo "clonim REPL — each input is compiled to a native binary and run."
+    echo "Earlier inputs are replayed with their output hidden. :quit or Ctrl-D exits."
+  while true:
+    # Read lines until they hold complete forms.
+    var buf = ""
+    var spans: seq[(Value, Slice[int])]
+    var eof = false
+    while true:
+      if interactive:
+        stdout.write(if buf.len == 0: ns & "=> " else: " ".repeat(ns.len) & "   ")
+        stdout.flushFile
+      var line: string
+      if not stdin.readLine(line):
+        eof = true
+        break
+      buf.add line & "\n"
+      if buf.strip in [":quit", ":q", ":exit"]:
+        eof = true
+        break
+      try:
+        spans = readAllSpans(buf)
+        break
+      except CljError as e:
+        if "EOF while reading" in e.msg: continue
+        stderr.writeLine("clonim: " & e.msg)
+        buf = ""
+        break
+    if eof:
+      if interactive: echo ""
+      break
+    if spans.len == 0: continue
+
+    var entry: seq[string] = @[]   # the input as it will be replayed
+    var shown: seq[string] = @[]   # the input with each value printed
+    var bad = ""
+    var newNs = ns
+    for (form, span) in spans:
+      let text = buf[span]
+      let head = headSymbol(form)
+      entry.add text
+      if head == "ns":
+        if history.len > 0 or entry.len > 1:
+          bad = "ns is only supported as the first REPL input"
+        elif form.items.len > 1 and form.items[1].kind == kSymbol:
+          newNs = form.items[1].s
+        shown.add text
+      elif isDefinition(head):
+        shown.add text
+        let name =
+          if form.items.len > 1 and form.items[1].kind == kSymbol and
+             head notin ["require", "declare", "extend-type", "extend-protocol",
+                         "extend", "import"]:
+            "#'" & newNs & "/" & form.items[1].s
+          else: "nil"
+        shown.add "(println " & cljStr(name) & ")"
+      else:
+        shown.add "(prn " & text & ")"
+    if bad.len > 0:
+      stderr.writeLine("clonim: " & bad)
+      continue
+
+    # An ns form has to open the program, so it goes before the marker.
+    let prefix = history & (if spans[0][0].headSymbol == "ns": @[shown[0]] else: @[])
+    let body = (if prefix.len > history.len: @["(println \"nil\")"] & shown[1 .. ^1]
+                else: shown)
+    let src = (prefix & @["(println " & cljStr(marker) & ")"] & body).join("\n")
+    let t0 = epochTime()
+    var bin = ""
+    try:
+      let nimSrc = compileSource(src, sourceRoots)
+      bin = buildProgram(nimSrc, "repl", keyPath, true, release, verbose, "",
+                         epochTime() - t0)
+    except BuildError as e:
+      stderr.writeLine("clonim: " & e.msg & "\n" & e.output)
+      continue
+    except CljError, IOError, OSError:
+      stderr.writeLine("clonim: " & getCurrentExceptionMsg())
+      continue
+    let (output, code) = execCmdEx(quoteShell(bin))
+    let at = output.find(marker & "\n")
+    stdout.write(if at >= 0: output[at + marker.len + 1 .. ^1] else: output)
+    stdout.flushFile
+    if code == 0:
+      history.add entry.join("\n")
+      ns = newNs
+    else:
+      stderr.writeLine("clonim: evaluation failed (exit code " & $code & ")")
+
+proc main() =
+  let argv = commandLineParams()
+  if argv.len >= 1 and argv[0] in ["version", "--version"]:
+    echo BuildSha
+    quit(0)
+  let isRepl = argv.len >= 1 and argv[0] == "repl"
+  if argv.len < 2 and not isRepl: usage()
+  let cmd = argv[0]
+  let file = (if isRepl: "" else: argv[1])
+  if not isRepl and not fileExists(file):
+    stderr.writeLine("clonim: no such file: " & file)
+    quit(1)
+
+  var outBin = ""
+  var verbose = false
+  var release = cmd == "build"
+  when defined(releaseCompiler):
+    # The distributed compiler ships one release-mode runtime archive. Nim's
+    # debug and release modes are not ABI-compatible, so `run` uses it too.
+    release = true
+  var sourceRoots: seq[string] = @[]
+  var i = (if isRepl: 1 else: 2)
+  while i < argv.len:
+    case argv[i]
+    of "-o":
+      inc i
+      if i >= argv.len or isRepl: usage()
+      outBin = argv[i]
+    of "--source-path":
+      inc i
+      if i >= argv.len: usage()
+      sourceRoots.add argv[i].absolutePath
+    of "-v": verbose = true
+    of "-d": release = true
+    else: usage()
+    inc i
+
+  if isRepl:
+    # Source-level libraries are loaded only by an explicit require form.
+    sourceRoots.add @[getCurrentDir(), srcDir().parentDir / "stdlib"]
+    repl(sourceRoots, release, verbose)
+    return
+
+  let t0 = epochTime()
+  var nimSrc = ""
+  try:
+    # Source-level libraries are loaded only by an explicit require form.
+    sourceRoots.add @[getCurrentDir(), file.absolutePath.parentDir,
+                      srcDir().parentDir / "stdlib"]
+    nimSrc = compileSource(readFile(file), sourceRoots)
+  except CljError, IOError, OSError:
+    stderr.writeLine("clonim: " & getCurrentExceptionMsg())
+    quit(1)
+  let tCompile = epochTime() - t0
+
+  if cmd == "emit":
+    stdout.write nimSrc
+    return
+
+  try:
+    outBin = buildProgram(nimSrc, file.splitFile.name, file.absolutePath,
+                          cmd == "run", release, verbose, outBin, tCompile)
+  except BuildError as e:
+    stderr.writeLine("clonim: " & e.msg & "\n" & e.output)
+    stderr.writeLine("--- generated source ---\n" & nimSrc)
+    quit(1)
+  except IOError, OSError:
+    stderr.writeLine("clonim: " & getCurrentExceptionMsg())
+    quit(1)
 
   case cmd
   of "build":
