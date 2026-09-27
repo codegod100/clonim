@@ -33,7 +33,7 @@ const syntaxHeads = ["quote", "if", "do", "let", "let*", "loop", "loop*",
   "when", "when-not", "if-not", "cond", "when-let", "if-let", "->", "->>",
   "doseq", "dotimes", "try", "catch", "finally", "comment", "set!", "declare",
   "case", "for", "with-open", "assert", "binding", "reify", "deftype",
-  "defprotocol", "."]
+  "defprotocol", ".", "while"]
 
 # Unlike macros, these heads cannot be shadowed in operator position.
 const specialForms = ["quote", "if", "do", "let*", "loop*", "recur", "fn*",
@@ -399,6 +399,11 @@ proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value 
     if meth.kind != kSymbol: fail(". requires a method name")
     return r.walk(ns, mkList(@[mkSymbol("clonim.rt/invoke-method"), xs[1],
                                mkStr(meth.s)] & args), locals)
+  of "while":
+    if xs.len < 2: fail("while requires a test")
+    return r.walk(ns, mkList(@[mkSymbol("loop"), mkVector(@[]),
+      mkList(@[mkSymbol("when"), xs[1]] & xs[2 .. ^1] & @[mkList(@[mkSymbol("recur")])])]),
+      locals)
   of "reify":
     return r.walk(ns, mkList(@[mkSymbol("clonim.rt/make-object"), mkStr("reify"),
                                methodTable(xs[1 .. ^1])]), locals)

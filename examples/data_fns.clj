@@ -24,3 +24,7 @@
 (prn (compare (java.util.Date. 1) (java.util.Date. 2)) (uuid? (random-uuid)))
 (try (throw (ex-info "boom" {:code 7}))
   (catch Exception e (prn (ex-message e) (ex-data e))))
+(prn (seq? '(1)) (seq? [1]) (filterv odd? [1 2 3]) (not-any? odd? [2 4]) ((every-pred odd? pos?) 1 3) ((some-fn :a :b) {:b 2}))
+(def n (atom 0))
+(while (< @n 3) (swap! n inc))
+(prn @n)

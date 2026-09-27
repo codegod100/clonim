@@ -1163,6 +1163,36 @@ proc registerCoreData() =
       if mapContains(cache, k): return mapGet(cache, k, NilV)
       result = call(f, args)
       cache = mapAssoc(cache, k, result))
+  def "seq?", proc (a: openArray[Value]): Value =
+    mkBool(a[0].kind in {kList, kCons, kChunk, kLazy})
+  def "filterv", proc (a: openArray[Value]): Value =
+    var r: seq[Value] = @[]
+    for x in elems(a[1]):
+      if truthy(call(a[0], [x])): r.add x
+    mkVector(r)
+  def "not-any?", proc (a: openArray[Value]): Value =
+    for x in elems(a[1]):
+      if truthy(call(a[0], [x])): return FalseV
+    TrueV
+  def "not-every?", proc (a: openArray[Value]): Value =
+    for x in elems(a[1]):
+      if not truthy(call(a[0], [x])): return TrueV
+    FalseV
+  def "every-pred", proc (a: openArray[Value]): Value =
+    let ps = @a
+    mkFn("every-pred", proc (args: openArray[Value]): Value =
+      for p in ps:
+        for x in args:
+          if not truthy(call(p, [x])): return FalseV
+      TrueV)
+  def "some-fn", proc (a: openArray[Value]): Value =
+    let ps = @a
+    mkFn("some-fn", proc (args: openArray[Value]): Value =
+      for p in ps:
+        for x in args:
+          let r = call(p, [x])
+          if truthy(r): return r
+      NilV)
   def "sequential?", proc (a: openArray[Value]): Value =
     mkBool(a[0].kind in {kList, kVector, kCons, kChunk, kLazy})
   def "seqable?", proc (a: openArray[Value]): Value =
