@@ -210,5 +210,6 @@ library above returns them where Clojure does.
 
 ```bash
 ./run-tests.sh   # builds the compiler, diffs every example against tests/*.expected
+                 # (examples run in parallel; JOBS=1 runs them one at a time)
 nim r --path:src tests/test_namespaces.nim  # namespace resolution and loader tests
 ```
