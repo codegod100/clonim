@@ -64,6 +64,36 @@ when defined(releaseCompiler):
         writeFile(tmp, contents)
         moveFile(tmp, path)
 
+  proc flock(fd: cint, op: cint): cint {.importc, header: "<sys/file.h>".}
+  var LOCK_EX {.importc, header: "<sys/file.h>".}: cint
+  var EINTR {.importc, header: "<errno.h>".}: cint
+
+  proc withRuntimeCache(nimcache: string, build: proc (): int): int =
+    ## Runs `build` against the shared runtime nimcache. The first build
+    ## compiles the runtime's objects into it, and concurrent first builds would
+    ## overwrite each other's files, so it holds an exclusive lock until a build
+    ## succeeds. Later builds only read those objects and skip the lock.
+    let warm = nimcache / "warm"
+    if fileExists(warm): return build()
+    createDir(nimcache)
+    var lock: File
+    if not open(lock, nimcache & ".lock", fmReadWrite):
+      raise newException(IOError, "cannot open " & nimcache & ".lock")
+    while flock(getOsFileHandle(lock), LOCK_EX) != 0:
+      if osLastError() != OSErrorCode(EINTR):
+        close(lock)
+        raiseOSError(osLastError())
+    if fileExists(warm):
+      # Another build warmed the cache while this one waited; build alongside
+      # the others rather than one at a time.
+      close(lock)
+      return build()
+    try:
+      result = build()
+      if result == 0: writeFile(warm, "")
+    finally:
+      close(lock)  # closing the descriptor releases the lock
+
 proc usage() =
   echo """clonim — a Clojure compiler hosted on Nim
 
@@ -271,7 +301,15 @@ proc main() =
   var output = ""
   var code = 0
   if not cached:
-    (output, code) = execCmdEx(nimCmd.join(" "))
+    when defined(releaseCompiler):
+      try:
+        code = withRuntimeCache(nimcache, proc (): int =
+          (output, result) = execCmdEx(nimCmd.join(" ")))
+      except IOError, OSError:
+        stderr.writeLine("clonim: " & getCurrentExceptionMsg())
+        quit(1)
+    else:
+      (output, code) = execCmdEx(nimCmd.join(" "))
     if code == 0: writeFile(stamp, buildKey(nimSrc, release, rtLib))
   let tBuild = epochTime() - t1
   if code != 0:

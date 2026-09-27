@@ -40,9 +40,9 @@ for f in examples/*.clj; do
   names+=("$name")
 done
 
-# The first example runs alone: it builds the state later runs share (the
-# private runtime archive, or the release compiler's unpacked runtime sources),
-# which concurrent first runs would otherwise race to create.
+# The first example runs alone: from a source checkout it builds the private
+# runtime archive, which concurrent first runs would race to create. (The
+# release compiler locks its shared runtime cache itself.)
 running=0
 for i in "${!names[@]}"; do
   name=${names[$i]}
