@@ -108,15 +108,26 @@ jobs:
           echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool-x86_64.AppImage" \
             | sha256sum --check
           chmod +x /tmp/appimagetool-x86_64.AppImage
-          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 \
-            /tmp/appimagetool-x86_64.AppImage \
-            "$appdir" dist/clonim-linux-x86_64.AppImage
+          # Embed update information so AppImageUpdate can fetch deltas from
+          # the latest GitHub release. appimagetool writes the .zsync file to
+          # the working directory, so run it from dist/.
+          update_info="gh-releases-zsync|${GITHUB_REPOSITORY_OWNER}|${GITHUB_REPOSITORY#*/}|latest|clonim-linux-x86_64.AppImage.zsync"
+          (
+            cd dist
+            ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 \
+              /tmp/appimagetool-x86_64.AppImage \
+              --updateinformation "$update_info" \
+              clonim.AppDir clonim-linux-x86_64.AppImage
+          )
+          test -f dist/clonim-linux-x86_64.AppImage.zsync
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: clonim-${{ steps.release.outputs.tag }}-linux-x86_64
-          path: dist/clonim-linux-x86_64.AppImage
+          path: |
+            dist/clonim-linux-x86_64.AppImage
+            dist/clonim-linux-x86_64.AppImage.zsync
           if-no-files-found: error
           retention-days: 90
 
@@ -132,7 +143,12 @@ jobs:
             clonim, Nim 2.2.12, Zig 0.15.2 as its C compiler/linker, and clonim's
             private static runtime. It has no external build dependencies, and
             generated programs statically link the clonim runtime.
+
+            The AppImage embeds update information, so it can be updated in
+            place with AppImageUpdate (`appimageupdatetool clonim-linux-x86_64.AppImage`).
           draft: false
           prerelease: false
-          files: dist/clonim-linux-x86_64.AppImage
+          files: |
+            dist/clonim-linux-x86_64.AppImage
+            dist/clonim-linux-x86_64.AppImage.zsync
           fail_on_unmatched_files: true
