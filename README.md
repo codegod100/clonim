@@ -59,6 +59,78 @@ Source-level libraries are loaded explicitly. Use
 `(require '[clonim.core :refer [now-ms]])` to load `stdlib/clonim/core.clj`. Host-dependent operations remain small runtime primitives; for
 example, the stdlib `now-ms` function wraps the `*epoch-time-ms*` primitive.
 
+### SQLite
+
+`clonim.sqlite` opens SQLite databases through the `*sqlite-open*` primitive.
+The runtime loads `libsqlite3` on first use, the way `-d:ssl` loads OpenSSL.
+Programs that don't use SQLite neither link against it nor need it installed.
+Set `CLONIM_SQLITE_LIB` to load a specific library file.
+
+```clojure
+(require '[clonim.sqlite :as sql])
+
+(def db (sql/open "app.db"))              ; or ":memory:"
+(sql/execute! db "create table if not exists log (t integer primary key, tx text)")
+(sql/execute! db "insert into log (tx) values (?)" ["[:a 1]"])
+;=> {:changes 1, :last-insert-rowid 1}
+(sql/query db "select * from log where t > ?" [0])
+;=> [{:t 1, :tx "[:a 1]"}]
+(sql/transaction db (fn [] (sql/execute! db "delete from log") :done))
+(sql/close db)                            ; or use with-open
+```
+
+- **Parameters:** `nil`, integers, floats and strings bind as themselves.
+  Booleans bind as 1 and 0. A byte array, or any sequence of integers, binds
+  as a blob.
+- **Results:** rows come back as maps keyed by column-name keywords. Blobs
+  are sequences of unsigned bytes.
+- **Scripts:** `execute!` without parameters runs every statement in its
+  string.
+- **Transactions:** `transaction` runs `(f)` between `BEGIN IMMEDIATE` and
+  `COMMIT`. If `f` throws, it rolls back and rethrows.
+- **Errors:** SQLite errors are `ex-info` with `{:sqlite/code n :sql "..."}`.
+- **Locking:** a handle waits up to 5 s for another process's write lock
+  before failing with `SQLITE_BUSY`.
+
+### PostgreSQL
+
+`clonim.postgres` connects through the `*pg-connect*` primitive. The runtime
+loads `libpq` on first use, like SQLite. Set `CLONIM_LIBPQ` to load a
+specific library file. The connection string is anything libpq accepts, so
+any provider works (TLS included).
+
+```clojure
+(require '[clonim.postgres :as pg])
+
+(def db (pg/connect (System/getenv "DATABASE_URL")))  ; postgresql://user:pass@host/db?sslmode=require
+(pg/execute! db "insert into log (tx) values ($1)" ["[:a 1]"])   ;=> {:changes 1}
+(pg/query db "select * from log where t > $1" [0])              ;=> [{:t 1, :tx "[:a 1]"}]
+(pg/transaction db (fn [] (pg/execute! db "delete from log") :done))
+
+(pg/listen db "events")
+(pg/notifications db 1000)   ; waits up to 1 s => [{:channel "events", :payload "...", :pid 42}]
+```
+
+- **Parameters:** placeholders are `$1`, `$2`, … and travel in text
+  format. `nil`, integers, floats, strings and booleans bind as
+  themselves. A byte array binds as `bytea`.
+- **Results:** rows come back as maps keyed by column-name keywords, typed
+  by column. Integers, floats and booleans come back as themselves, `bytea`
+  as unsigned bytes, and `numeric` as an integer or a float. Everything
+  else (text, json, timestamps) comes back as a string.
+- **Transactions:** `transaction` wraps `(f)` in `BEGIN`/`COMMIT`. If `f`
+  throws, it rolls back and rethrows.
+- **Notifications:** `notifications` returns the notifications received
+  on `listen`ed channels. If none have arrived, it waits for one in
+  `poll(2)` rather than looping.
+- **Errors:** server errors are `ex-info` with
+  `{:pg/sqlstate "23505" :sql "..."}`.
+- **Tests:** `examples/postgres.clj` runs only when `CLONIM_TEST_POSTGRES`
+  holds a connection URI.
+
+`System/getenv` reads the environment, for connection strings kept in
+secrets.
+
 ## Namespaces and libraries
 
 Each file may start with a namespace declaration:

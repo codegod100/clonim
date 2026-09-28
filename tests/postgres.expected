@@ -1,0 +1,16 @@
+{:changes 1}
+[{:id 1, :name "Ada", :age 36, :score 9.5, :ok true, :n 12} {:id 2, :name "Grace", :age nil, :score 8.25, :ok false, :n 2.5}]
+[{:photo (0 127 255 200)}]
+[]
+[{:id 3}]
+:committed
+[abort {:why :test}]
+[{:name "Ada", :age 37} {:name "Grace", :age nil} {:name "Barbara", :age nil}]
+42P01
+23505
+[]
+([clonim_test hello])
+[] true
+(in-tx)
+PostgreSQL connection is closed
+08001
