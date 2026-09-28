@@ -1598,6 +1598,8 @@ proc registerCoreStateHost*() =
   def "format", proc (a: openArray[Value]): Value = mkStr(javaFormat(sOf(a[0]), a[1 .. ^1]))
   def "System/exit", proc (a: openArray[Value]): Value =
     quit(if a.len > 0: int(intOf(a[0])) else: 0)
+  def "Thread/sleep", proc (a: openArray[Value]): Value =
+    sleep(int(intOf(a[0]))); NilV
   def "System/currentTimeMillis", proc (a: openArray[Value]): Value =
     mkInt(int64(epochTime() * 1000))
   def "System/getProperty", proc (a: openArray[Value]): Value =
