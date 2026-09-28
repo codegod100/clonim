@@ -303,7 +303,8 @@ proc replHostExe(release: bool): string =
     if not stale: return
   if not fileExists(source):
     raise newException(IOError, "missing REPL host: " & result)
-  stderr.writeLine("clonim: building the REPL host (once per runtime change)")
+  if isatty(stdin):
+    stderr.writeLine("clonim: building the REPL host (once per runtime change)")
   createDir(result.parentDir)
   var args = @["nim", "c", "--hints:off", "--warnings:off",
                "--path:" & srcDir(), "--passC:-I" & srcDir() / "repl",
