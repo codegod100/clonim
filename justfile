@@ -13,7 +13,9 @@ runtime-libs:
     nim c -d:release -d:ssl --app:staticlib --nimMainPrefix:ClonimRuntime --hints:off --warnings:off --nimcache:lib/nimcache-release -o:lib/libclonim_runtime.a src/runtime_lib.nim
 
 # Build with optimisations on (compiler and, via -d:release, the programs it emits)
-release: runtime-libs
+# The release compiler links programs against bin/libclonim_runtime.a.
+release:
+    packaging/build-runtime.sh bin/libclonim_runtime.a
     nim c -d:release -d:releaseCompiler --hints:off --warnings:off -o:{{bin}} src/clonim.nim
 
 # Run every example against tests/<name>.expected
