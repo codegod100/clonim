@@ -29,8 +29,10 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # Pushes to main publish a rolling "release" prerelease; version tags
-      # publish a regular release. Each AppImage updates from its own channel.
+      # Pushes to main publish a rolling "release" release and version tags
+      # publish a versioned one. Both are marked as the repository's latest
+      # release and embed the "latest" update channel, because updaters such
+      # as Gear Lever resolve updates only through GitHub's /releases/latest.
       - name: Resolve release tag
         id: release
         env:
@@ -44,8 +46,7 @@ jobs:
             {
               echo "tag=release"
               echo "ref=$SHA"
-              echo "channel=release"
-              echo "prerelease=true"
+              echo "channel=latest"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -62,7 +63,6 @@ jobs:
             echo "tag=$tag"
             echo "ref=$tag"
             echo "channel=latest"
-            echo "prerelease=false"
           } >> "$GITHUB_OUTPUT"
 
       - name: Check out release ref
@@ -88,29 +88,37 @@ jobs:
       - name: Run test suite
         run: ./run-tests.sh
 
-      - name: Build optimized compiler
+      # The AppImage compiles and links programs with a bundled Zig, so the
+      # runtime archive it ships is built with that Zig too: objects from the
+      # runner's gcc can reference newer glibc symbols than Zig links against.
+      - name: Install bundled Zig
+        run: |
+          appdir=dist/clonim.AppDir
+          curl --fail --location --silent --show-error \
+            https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz \
+            -o /tmp/zig-x86_64-linux-0.15.2.tar.xz
+          echo "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239  /tmp/zig-x86_64-linux-0.15.2.tar.xz" \
+            | sha256sum --check
+          mkdir -p "$appdir/usr/lib/zig"
+          tar --extract --xz --file /tmp/zig-x86_64-linux-0.15.2.tar.xz \
+            --strip-components=1 --directory "$appdir/usr/lib/zig"
+          install -Dm755 packaging/appimage/gcc "$appdir/usr/bin/gcc"
+          ln -s gcc "$appdir/usr/bin/cc"
+
+      - name: Build optimized compiler and runtime archive
         run: |
           nim c -d:release -d:releaseCompiler --hints:off --warnings:off \
             -o:bin/clonim src/clonim.nim
+          PATH="$PWD/dist/clonim.AppDir/usr/bin:$PATH" \
+            packaging/build-runtime.sh bin/libclonim_runtime.a
 
-      # The optimized compiler compiles the runtime from source once into a
-      # shared cache under /tmp/clonim-runtime, then reuses it for every
-      # program. Keep that cache between runs. The key covers everything that
-      # feeds the runtime's C: its sources, the stdlib, clonim.nim (C flags)
-      # and the Nim version. A new key starts a fresh cache rather than
-      # restoring an old one, because a changed runtime unpacks into a new
-      # directory and the old one would only add dead weight.
-      - name: Cache compiled runtime
-        uses: actions/cache@v4
-        with:
-          path: /tmp/clonim-runtime
-          key: clonim-runtime-${{ runner.os }}-nim${{ env.NIM_VERSION }}-${{ hashFiles('src/clonim.nim', 'src/app_runtime_source.nim', 'src/runtime_lib.nim', 'src/runtime_types.nim', 'src/runtime.nim', 'src/core.nim', 'src/namespaces.nim', 'src/reader.nim', 'stdlib/**') }}
-
-      # The release compiler compiles generated programs against the runtime
-      # sources it embeds rather than the private runtime archive, so test it
-      # separately from the source-built compiler above.
+      # The release compiler links programs against the shipped runtime archive
+      # rather than building from the runtime sources, so test it separately
+      # from the source-built compiler above, with the bundled Zig.
       - name: Run test suite with optimized compiler
-        run: CLONIM=bin/clonim ./run-tests.sh
+        run: |
+          PATH="$PWD/dist/clonim.AppDir/usr/bin:$PATH" CLONIM=bin/clonim \
+            ./run-tests.sh
 
       - name: Package release
         env:
@@ -118,6 +126,8 @@ jobs:
         run: |
           appdir=dist/clonim.AppDir
           install -Dm755 bin/clonim "$appdir/usr/bin/clonim"
+          install -Dm644 bin/libclonim_runtime.a \
+            "$appdir/usr/bin/libclonim_runtime.a"
           nim_lib=$(nim dump --hints:off 2>&1 | grep '^/.*\/lib$' | tail -n 1)
           test -f "$nim_lib/system.nim" || {
             echo "Unable to locate Nim's library directory" >&2
@@ -128,17 +138,6 @@ jobs:
           install -Dm755 "$nim_bin" "$appdir/usr/bin/nim"
           cp -a "$nim_lib/." "$appdir/usr/lib/"
           cp -a "$nim_root/config" "$appdir/usr/config"
-          install -Dm755 packaging/appimage/gcc "$appdir/usr/bin/gcc"
-          ln -s gcc "$appdir/usr/bin/cc"
-
-          curl --fail --location --silent --show-error \
-            https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz \
-            -o /tmp/zig-x86_64-linux-0.15.2.tar.xz
-          echo "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239  /tmp/zig-x86_64-linux-0.15.2.tar.xz" \
-            | sha256sum --check
-          mkdir -p "$appdir/usr/lib/zig"
-          tar --extract --xz --file /tmp/zig-x86_64-linux-0.15.2.tar.xz \
-            --strip-components=1 --directory "$appdir/usr/lib/zig"
 
           install -Dm755 packaging/appimage/AppRun "$appdir/AppRun"
           install -Dm644 packaging/appimage/clonim.desktop \
@@ -152,9 +151,9 @@ jobs:
           echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool-x86_64.AppImage" \
             | sha256sum --check
           chmod +x /tmp/appimagetool-x86_64.AppImage
-          # Embed update information so AppImageUpdate can fetch deltas from
-          # the newest release on this build's channel. appimagetool writes
-          # the .zsync file to the working directory, so run it from dist/.
+          # Embed update information so AppImageUpdate and Gear Lever can fetch
+          # GitHub's latest release. appimagetool writes the .zsync file to the
+          # working directory, so run it from dist/.
           update_info="gh-releases-zsync|${GITHUB_REPOSITORY_OWNER}|${GITHUB_REPOSITORY#*/}|${UPDATE_CHANNEL}|clonim-linux-x86_64.AppImage.zsync"
           (
             cd dist
@@ -197,8 +196,8 @@ jobs:
             The AppImage embeds update information, so it can be updated in
             place with AppImageUpdate (`appimageupdatetool clonim-linux-x86_64.AppImage`).
           draft: false
-          prerelease: ${{ steps.release.outputs.prerelease }}
-          make_latest: ${{ steps.release.outputs.prerelease == 'true' && 'false' || 'true' }}
+          prerelease: false
+          make_latest: true
           files: |
             dist/clonim-linux-x86_64.AppImage
             dist/clonim-linux-x86_64.AppImage.zsync
