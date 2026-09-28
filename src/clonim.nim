@@ -19,29 +19,19 @@ const
   BuildSha = (if ClonimSha.len > 0: ClonimSha else: gitSha())
 
 when defined(releaseCompiler):
-  # The release workflow's runtime cache key lists these files; keep it in step.
   const
-    EmbeddedAppRuntime = staticRead("app_runtime_source.nim")
+    EmbeddedAppRuntime = staticRead("app_runtime.nim")
     EmbeddedRuntimeTypes = staticRead("runtime_types.nim")
-    EmbeddedRuntime = staticRead("runtime.nim")
-    EmbeddedCore = staticRead("core.nim")
-    EmbeddedNamespaces = staticRead("namespaces.nim")
-    EmbeddedReader = staticRead("reader.nim")
-    EmbeddedRuntimeLib = staticRead("runtime_lib.nim")
     EmbeddedCoreStdlib = staticRead("../stdlib/clonim/core.clj")
     EmbeddedJavaIoStdlib = staticRead("../stdlib/clojure/java/io.clj")
     EmbeddedMvnHttpStdlib = staticRead("../stdlib/jolt/mvn_http.clj")
 
   proc embeddedRoot(): string =
     ## Materialize the compiler-only inputs under a content-keyed cache. The
-    ## runtime implementation remains the separately shipped static archive.
+    ## runtime implementation is the static archive shipped beside the
+    ## compiler; programs only see its private interface.
     var h: Hash = hash(EmbeddedAppRuntime)
     h = h !& hash(EmbeddedRuntimeTypes)
-    h = h !& hash(EmbeddedRuntime)
-    h = h !& hash(EmbeddedCore)
-    h = h !& hash(EmbeddedNamespaces)
-    h = h !& hash(EmbeddedReader)
-    h = h !& hash(EmbeddedRuntimeLib)
     h = h !& hash(EmbeddedCoreStdlib)
     h = h !& hash(EmbeddedJavaIoStdlib)
     h = h !& hash(EmbeddedMvnHttpStdlib)
@@ -49,11 +39,6 @@ when defined(releaseCompiler):
     let files = [
       (result / "src" / "app_runtime.nim", EmbeddedAppRuntime),
       (result / "src" / "runtime_types.nim", EmbeddedRuntimeTypes),
-      (result / "src" / "runtime.nim", EmbeddedRuntime),
-      (result / "src" / "core.nim", EmbeddedCore),
-      (result / "src" / "namespaces.nim", EmbeddedNamespaces),
-      (result / "src" / "reader.nim", EmbeddedReader),
-      (result / "src" / "runtime_lib.nim", EmbeddedRuntimeLib),
       (result / "stdlib" / "clonim" / "core.clj", EmbeddedCoreStdlib),
       (result / "stdlib" / "clojure" / "java" / "io.clj", EmbeddedJavaIoStdlib),
       (result / "stdlib" / "jolt" / "mvn_http.clj", EmbeddedMvnHttpStdlib),
@@ -65,36 +50,6 @@ when defined(releaseCompiler):
         let tmp = path & "." & $getCurrentProcessId() & ".tmp"
         writeFile(tmp, contents)
         moveFile(tmp, path)
-
-  proc flock(fd: cint, op: cint): cint {.importc, header: "<sys/file.h>".}
-  var LOCK_EX {.importc, header: "<sys/file.h>".}: cint
-  var EINTR {.importc, header: "<errno.h>".}: cint
-
-  proc withRuntimeCache(nimcache: string, build: proc (): int): int =
-    ## Runs `build` against the shared runtime nimcache. The first build
-    ## compiles the runtime's objects into it, and concurrent first builds would
-    ## overwrite each other's files, so it holds an exclusive lock until a build
-    ## succeeds. Later builds only read those objects and skip the lock.
-    let warm = nimcache / "warm"
-    if fileExists(warm): return build()
-    createDir(nimcache)
-    var lock: File
-    if not open(lock, nimcache & ".lock", fmReadWrite):
-      raise newException(IOError, "cannot open " & nimcache & ".lock")
-    while flock(getOsFileHandle(lock), LOCK_EX) != 0:
-      if osLastError() != OSErrorCode(EINTR):
-        close(lock)
-        raiseOSError(osLastError())
-    if fileExists(warm):
-      # Another build warmed the cache while this one waited; build alongside
-      # the others rather than one at a time.
-      close(lock)
-      return build()
-    try:
-      result = build()
-      if result == 0: writeFile(warm, "")
-    finally:
-      close(lock)  # closing the descriptor releases the lock
 
 proc usage() =
   echo """clonim — a Clojure compiler hosted on Nim
@@ -128,6 +83,12 @@ proc runtimeLib(release: bool): string =
   ## executable beside its sources rather than under bin/, so keep its archive
   ## inside the installed package; putting it in pkgs2/lib makes Nim interpret
   ## that directory as a malformed package on later invocations.
+  when defined(releaseCompiler):
+    # The AppImage ships one release-mode archive, built with its bundled Zig.
+    let shipped = getAppDir() / "libclonim_runtime.a"
+    if fileExists(shipped): return shipped
+    raise newException(IOError,
+      "missing runtime library beside compiler: " & shipped)
   let libName = (if release: "libclonim_runtime.a" else: "libclonim_runtime_debug.a")
   let appDir = getAppDir()
   let installedRoot =
@@ -162,10 +123,10 @@ proc runtimeLib(release: bool): string =
   installed
 
 
-proc buildKey(nimSrc: string, release: bool, rtLib: string): string =
+proc buildKey(nimSrc: string, release, optimize: bool, rtLib: string): string =
   ## Identifies everything the produced binary depends on. Any change here
   ## invalidates the cached binary for a source file.
-  var h: Hash = hash(nimSrc) !& hash(release)
+  var h: Hash = hash(nimSrc) !& hash(release) !& hash(optimize)
 
   for f in walkFiles(srcDir() / "*.nim"):
     h = h !& hash(readFile(f))
@@ -179,7 +140,8 @@ proc buildKey(nimSrc: string, release: bool, rtLib: string): string =
 type BuildError = object of CatchableError
   output: string  ## what the Nim backend printed
 
-proc buildProgram(nimSrc, stem, keyPath: string, isRun, release, verbose: bool,
+proc buildProgram(nimSrc, stem, keyPath: string,
+                  isRun, release, optimize, verbose: bool,
                   outBin: string, tCompile: float): string =
   ## Compiles generated Nim to a native binary and returns its path. `keyPath`
   ## names the program's persistent work directory; `isRun` lets an unchanged
@@ -199,19 +161,17 @@ proc buildProgram(nimSrc, stem, keyPath: string, isRun, release, verbose: bool,
   let work = getTempDir() / "clonim" /
              (modName & "-" & pathKey & (if release: "-r" else: ""))
   createDir(work)
-  # The release compiler shares one nimcache between all programs, so the
-  # runtime's objects are compiled once rather than per program (see
-  # app_runtime_source.nim). The program's own module lands there too, so its
-  # name carries the path key to keep same-named files apart. Nim records its
-  # C compiler command, including -I<program dir>, in every C file it writes,
-  # so all programs also share one directory or no C file would ever match.
-  var nimcache = work / "cache"
-  var nimFile = work / (modName & ".nim")
-  when defined(releaseCompiler):
-    nimcache = srcDir().parentDir / "nimcache"
-    createDir(srcDir().parentDir / "programs")
-    nimFile = srcDir().parentDir / "programs" / (modName & "_" & pathKey & ".nim")
-  writeFile(nimFile, nimSrc)
+  let nimcache = work / "cache"
+  let nimFile = work / (modName & ".nim")
+  if release and not optimize:
+    # The release compiler builds `run` programs in release mode for ABI
+    # reasons only. The program's own module is one large C file that takes
+    # minutes to compile at -O3 for little gain, so only it drops to -O0. Nim's
+    # stdlib stays optimized: its allocator and refcounting are the copies the
+    # runtime archive uses too.
+    writeFile(nimFile, "{.localPassC: \"-O0\".}\n" & nimSrc)
+  else:
+    writeFile(nimFile, nimSrc)
 
   var outBin = outBin
   if outBin.len == 0:
@@ -223,21 +183,19 @@ proc buildProgram(nimSrc, stem, keyPath: string, isRun, release, verbose: bool,
   # changed: the generated Nim, private runtime archive/interface, build flags,
   # and the Nim compiler itself.
   let stamp = work / "stamp"
-  var rtLib = ""
-  when not defined(releaseCompiler):
-    rtLib = runtimeLib(release)
+  let rtLib = runtimeLib(release)
   let cached = isRun and fileExists(outBin) and fileExists(stamp) and
-               readFile(stamp) == buildKey(nimSrc, release, rtLib)
+               readFile(stamp) == buildKey(nimSrc, release, optimize, rtLib)
 
   var nimCmd = @["nim", "c", "--hints:off", "--warnings:off",
                  "--path:" & srcDir(), "--nimcache:" & nimcache,
-                 "-o:" & outBin]
+                 "--passL:" & rtLib, "--passL:-lm", "-o:" & outBin]
   when not defined(releaseCompiler):
+    # The release archive's symbols are weak instead (packaging/build-runtime.sh):
+    # Zig's linker does not accept this flag.
     nimCmd.add "--passL:-Wl,--allow-multiple-definition"
-    nimCmd.add "--passL:" & rtLib
-  nimCmd.add "--passL:-lm"
   # Per-function sections let --gc-sections drop the runtime code a program
-  # never reaches; the shared runtime objects carry all of it.
+  # never reaches.
   nimCmd.add "--passC:-ffunction-sections"
   nimCmd.add "--passC:-fdata-sections"
   nimCmd.add "--passL:-Wl,--gc-sections"
@@ -256,12 +214,8 @@ proc buildProgram(nimSrc, stem, keyPath: string, isRun, release, verbose: bool,
   var output = ""
   var code = 0
   if not cached:
-    when defined(releaseCompiler):
-      code = withRuntimeCache(nimcache, proc (): int =
-        (output, result) = execCmdEx(nimCmd.join(" ")))
-    else:
-      (output, code) = execCmdEx(nimCmd.join(" "))
-    if code == 0: writeFile(stamp, buildKey(nimSrc, release, rtLib))
+    (output, code) = execCmdEx(nimCmd.join(" "))
+    if code == 0: writeFile(stamp, buildKey(nimSrc, release, optimize, rtLib))
   let tBuild = epochTime() - t1
   if code != 0:
     var e = newException(BuildError, "Nim backend failed")
@@ -290,7 +244,7 @@ proc isDefinition(head: string): bool =
   head.startsWith("def") or head in ["ns", "require", "declare", "extend-type",
                                      "extend-protocol", "extend", "import"]
 
-proc repl(sourceRoots: seq[string], release, verbose: bool) =
+proc repl(sourceRoots: seq[string], release, optimize, verbose: bool) =
   ## clonim has no interpreter, so each input is compiled and run as a whole
   ## program: every earlier successful input, a marker line, then the new
   ## forms with each expression's value printed. Only output after the marker
@@ -373,7 +327,7 @@ proc repl(sourceRoots: seq[string], release, verbose: bool) =
     var bin = ""
     try:
       let nimSrc = compileSource(src, sourceRoots)
-      bin = buildProgram(nimSrc, "repl", keyPath, true, release, verbose, "",
+      bin = buildProgram(nimSrc, "repl", keyPath, true, release, optimize, verbose, "",
                          epochTime() - t0)
     except BuildError as e:
       stderr.writeLine("clonim: " & e.msg & "\n" & e.output)
@@ -407,6 +361,7 @@ proc main() =
   var outBin = ""
   var verbose = false
   var release = cmd == "build"
+  var optimize = release
   when defined(releaseCompiler):
     # The distributed compiler ships one release-mode runtime archive. Nim's
     # debug and release modes are not ABI-compatible, so `run` uses it too.
@@ -424,14 +379,16 @@ proc main() =
       if i >= argv.len: usage()
       sourceRoots.add argv[i].absolutePath
     of "-v": verbose = true
-    of "-d": release = true
+    of "-d":
+      release = true
+      optimize = true
     else: usage()
     inc i
 
   if isRepl:
     # Source-level libraries are loaded only by an explicit require form.
     sourceRoots.add @[getCurrentDir(), srcDir().parentDir / "stdlib"]
-    repl(sourceRoots, release, verbose)
+    repl(sourceRoots, release, optimize, verbose)
     return
 
   let t0 = epochTime()
@@ -452,7 +409,8 @@ proc main() =
 
   try:
     outBin = buildProgram(nimSrc, file.splitFile.name, file.absolutePath,
-                          cmd == "run", release, verbose, outBin, tCompile)
+                          cmd == "run", release, optimize, verbose, outBin,
+                          tCompile)
   except BuildError as e:
     stderr.writeLine("clonim: " & e.msg & "\n" & e.output)
     stderr.writeLine("--- generated source ---\n" & nimSrc)
