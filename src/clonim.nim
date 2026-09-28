@@ -7,6 +7,8 @@
 ##   clonim version                print the git SHA this binary was built from
 import std/[hashes, os, osproc, sequtils, strutils, terminal, times]
 import runtime, reader, compiler
+when not defined(windows):
+  import std/linenoise
 
 proc gitSha(): string {.compileTime.} =
   let (sha, code) = gorgeEx("git -C " & quoteShell(currentSourcePath().parentDir) &
@@ -245,6 +247,33 @@ proc isDefinition(head: string): bool =
   head.startsWith("def") or head in ["ns", "require", "declare", "extend-type",
                                      "extend-protocol", "extend", "import"]
 
+proc replHistoryFile(): string =
+  getEnv("CLONIM_HISTORY", getHomeDir() / ".clonim_history")
+
+type ReplRead = enum rrLine, rrCancel, rrEof
+
+proc replReadLine(prompt: string, interactive: bool, line: var string): ReplRead =
+  ## One line of REPL input. At a terminal this goes through linenoise, so the
+  ## line can be edited and earlier lines recalled with the arrow keys; Ctrl-C
+  ## cancels the input so far and Ctrl-D on an empty line exits.
+  when not defined(windows):
+    if interactive:
+      var res: ReadLineResult
+      readLineStatus(prompt, res)
+      case res.status
+      of lnCtrlC: return rrCancel
+      of lnCtrlD: return rrEof
+      else: discard
+      line = res.line
+      if line.strip.len > 0:
+        discard historyAdd(line.cstring)
+        discard historySave(replHistoryFile().cstring)
+      return rrLine
+  if interactive:
+    stdout.write(prompt)
+    stdout.flushFile
+  if stdin.readLine(line): rrLine else: rrEof
+
 proc repl(sourceRoots: seq[string], release, optimize, verbose: bool) =
   ## clonim has no interpreter, so each input is compiled and run as a whole
   ## program: every earlier successful input, a marker line, then the new
@@ -260,19 +289,25 @@ proc repl(sourceRoots: seq[string], release, optimize, verbose: bool) =
   if interactive:
     echo "clonim REPL — each input is compiled to a native binary and run."
     echo "Earlier inputs are replayed with their output hidden. :quit or Ctrl-D exits."
+    when not defined(windows):
+      discard historySetMaxLen(1000)
+      discard historyLoad(replHistoryFile().cstring)
   while true:
     # Read lines until they hold complete forms.
     var buf = ""
     var spans: seq[(Value, Slice[int])]
     var eof = false
     while true:
-      if interactive:
-        stdout.write(if buf.len == 0: ns & "=> " else: " ".repeat(ns.len) & "   ")
-        stdout.flushFile
+      let prompt = (if buf.len == 0: ns & "=> " else: " ".repeat(ns.len) & "   ")
       var line: string
-      if not stdin.readLine(line):
+      case replReadLine(prompt, interactive, line)
+      of rrEof:
         eof = true
         break
+      of rrCancel:
+        buf = ""
+        break
+      of rrLine: discard
       buf.add line & "\n"
       if buf.strip in [":quit", ":q", ":exit"]:
         eof = true

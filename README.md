@@ -22,6 +22,11 @@ only the new input's output and values are shown. Earlier inputs therefore run
 again on each evaluation (their output hidden), so side effects such as file
 writes repeat. An `ns` form is accepted only as the first input.
 
+At a terminal, input goes through linenoise (bundled with Nim): lines can be
+edited, the arrow keys recall earlier lines, Ctrl-C discards the input so far
+and Ctrl-D on an empty line exits. History is kept in `~/.clonim_history`
+(override with `CLONIM_HISTORY`).
+
 There is a `justfile` too: `just build`, `just test`, `just bench`,
 `just run <file>`, `just emit <file>`, `just accept` (re-record expectations).
 
