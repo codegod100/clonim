@@ -661,7 +661,7 @@ proc walk(r: Resolver, ns: Namespace, v: Value, locals: HashSet[string]): Value 
     xs[0] = mkList(@[mkSymbol("do"), xs[0]])
   mkList(xs)
 
-proc process(r: Resolver, forms: seq[Value], expected = "")
+proc process(r: Resolver, forms: seq[Value], expected = "", initial = "user")
 proc load(r: Resolver, name: string) =
   validNamespace(name)
   if name == "clojure.core": return
@@ -728,9 +728,9 @@ proc flatten(forms: seq[Value]): seq[Value] =
     if headName(f) == "do": result.add flatten(f.items[1 .. ^1])
     else: result.add f
 
-proc process(r: Resolver, forms: seq[Value], expected = "") =
+proc process(r: Resolver, forms: seq[Value], expected = "", initial = "user") =
   let flat = flatten(forms)
-  var name = "user"
+  var name = initial
   var declaration = -1
   for i, f in flat:
     if headName(f) == "ns":
@@ -791,5 +791,38 @@ proc resolveSource*(src: string, sourceRoots: seq[string]): seq[Value] =
     registerNamespaceCore()
     r.process(readAll(src))
     result = r.output
+  finally:
+    globals = saved
+
+type ReplResolver* = Resolver
+  ## Resolution state carried across REPL inputs: namespaces, their defs,
+  ## aliases and refers, macros and loaded libraries.
+
+proc newReplResolver*(sourceRoots: seq[string]): ReplResolver =
+  Resolver(roots: sourceRoots, cores: registeredCoreNames(),
+           hosts: registeredHostNames(), macros: initTable[string, MacroDef]())
+
+proc snapshot*(r: ReplResolver): ReplResolver =
+  ## A copy that later inputs cannot change, to roll back a failed input.
+  result = Resolver()
+  result[] = r[]
+  for name, ns in r.spaces:
+    let copy = Namespace()
+    copy[] = ns[]
+    result.spaces[name] = copy
+
+proc resolveRepl*(r: ReplResolver, src, ns: string): seq[Value] =
+  ## Resolves one REPL input in namespace `ns` against everything earlier
+  ## inputs defined, and returns only the forms this input adds. Libraries it
+  ## requires for the first time are spliced in ahead of it.
+  let saved = globals
+  globals = initTable[string, VarCell]()
+  try:
+    registerCore()
+    registerNamespaceCore()
+    r.output = @[]
+    r.process(readAll(src), initial = ns)
+    result = r.output
+    r.output = @[]
   finally:
     globals = saved

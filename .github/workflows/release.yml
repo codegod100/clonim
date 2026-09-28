@@ -111,6 +111,8 @@ jobs:
             -o:bin/clonim src/clonim.nim
           PATH="$PWD/dist/clonim.AppDir/usr/bin:$PATH" \
             packaging/build-runtime.sh bin/libclonim_runtime.a
+          PATH="$PWD/dist/clonim.AppDir/usr/bin:$PATH" \
+            packaging/build-repl-host.sh bin/clonim-repl-host
 
       # The release compiler links programs against the shipped runtime archive
       # rather than building from the runtime sources, so test it separately
@@ -128,6 +130,7 @@ jobs:
           install -Dm755 bin/clonim "$appdir/usr/bin/clonim"
           install -Dm644 bin/libclonim_runtime.a \
             "$appdir/usr/bin/libclonim_runtime.a"
+          install -Dm755 bin/clonim-repl-host "$appdir/usr/bin/clonim-repl-host"
           nim_lib=$(nim dump --hints:off 2>&1 | grep '^/.*\/lib$' | tail -n 1)
           test -f "$nim_lib/system.nim" || {
             echo "Unable to locate Nim's library directory" >&2

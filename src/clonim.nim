@@ -5,8 +5,8 @@
 ##   clonim emit  foo.clj          print the generated Nim
 ##   clonim repl                   interactive read-eval-print loop
 ##   clonim version                print the git SHA this binary was built from
-import std/[hashes, os, osproc, sequtils, strutils, terminal, times]
-import runtime, reader, compiler
+import std/[hashes, os, osproc, posix, sequtils, strutils, terminal, times]
+import runtime, reader, compiler, namespaces
 when not defined(windows):
   import std/linenoise
 
@@ -27,6 +27,7 @@ when defined(releaseCompiler):
     EmbeddedCoreStdlib = staticRead("../stdlib/clonim/core.clj")
     EmbeddedJavaIoStdlib = staticRead("../stdlib/clojure/java/io.clj")
     EmbeddedMvnHttpStdlib = staticRead("../stdlib/jolt/mvn_http.clj")
+    EmbeddedReplNimbase = staticRead("repl/nimbase.h")
 
   proc embeddedRoot(): string =
     ## Materialize the compiler-only inputs under a content-keyed cache. The
@@ -37,6 +38,7 @@ when defined(releaseCompiler):
     h = h !& hash(EmbeddedCoreStdlib)
     h = h !& hash(EmbeddedJavaIoStdlib)
     h = h !& hash(EmbeddedMvnHttpStdlib)
+    h = h !& hash(EmbeddedReplNimbase)
     result = getTempDir() / "clonim-runtime" / $(!$h)
     let files = [
       (result / "src" / "app_runtime.nim", EmbeddedAppRuntime),
@@ -44,6 +46,7 @@ when defined(releaseCompiler):
       (result / "stdlib" / "clonim" / "core.clj", EmbeddedCoreStdlib),
       (result / "stdlib" / "clojure" / "java" / "io.clj", EmbeddedJavaIoStdlib),
       (result / "stdlib" / "jolt" / "mvn_http.clj", EmbeddedMvnHttpStdlib),
+      (result / "src" / "repl" / "nimbase.h", EmbeddedReplNimbase),
     ]
     for (path, contents) in files:
       createDir(path.parentDir)
@@ -274,21 +277,166 @@ proc replReadLine(prompt: string, interactive: bool, line: var string): ReplRead
     stdout.flushFile
   if stdin.readLine(line): rrLine else: rrEof
 
+proc replHostExe(release: bool): string =
+  ## The REPL host (src/repl_host.nim): a runtime that stays up for the whole
+  ## session. Release archives ship it beside the compiler; a source checkout
+  ## builds it into lib/ on first use, like the runtime archive.
+  when defined(releaseCompiler):
+    result = getAppDir() / "clonim-repl-host"
+    if not fileExists(result):
+      raise newException(IOError, "missing REPL host beside compiler: " & result)
+    return
+  let appDir = getAppDir()
+  let installedRoot =
+    if fileExists(appDir / "app_runtime.nim"): appDir
+    else: appDir.parentDir
+  result = installedRoot / "lib" /
+           (if release: "clonim-repl-host" else: "clonim-repl-host-debug")
+  let source = srcDir() / "repl_host.nim"
+  if fileExists(result):
+    if not fileExists(source): return
+    var stale = getLastModificationTime(srcDir() / "repl" / "nimbase.h") >
+                getLastModificationTime(result)
+    for f in walkFiles(srcDir() / "*.nim"):
+      if getLastModificationTime(f) > getLastModificationTime(result):
+        stale = true
+    if not stale: return
+  if not fileExists(source):
+    raise newException(IOError, "missing REPL host: " & result)
+  stderr.writeLine("clonim: building the REPL host (once per runtime change)")
+  createDir(result.parentDir)
+  var args = @["nim", "c", "--hints:off", "--warnings:off",
+               "--path:" & srcDir(), "--passC:-I" & srcDir() / "repl",
+               "--passL:-rdynamic", "-d:ssl",
+               "--nimcache:" & result.parentDir /
+                 (if release: "nimcache-host-release" else: "nimcache-host-debug"),
+               "-o:" & result]
+  if release: args.add "-d:release"
+  args.add source
+  let (output, code) = execCmdEx(args.mapIt(quoteShell(it)).join(" "))
+  if code != 0:
+    raise newException(IOError, "failed to build REPL host\n" & output)
+
+proc buildReplInput(nimSrc, work, outLib: string,
+                    release, optimize, verbose: bool) =
+  ## Compiles one REPL input to a shared library for the host to load. The
+  ## module path stays the same across inputs so the nimcache keeps the Nim
+  ## system module compiled; only the input's own C file is rebuilt.
+  let nimFile = work / "clonim_repl_input.nim"
+  if release and not optimize:
+    writeFile(nimFile, "{.localPassC: \"-O0\".}\n" & nimSrc)  # see buildProgram
+  else:
+    writeFile(nimFile, nimSrc)
+  var nimCmd = @["nim", "c", "--app:lib", "--noMain", "--hints:off",
+                 "--warnings:off", "--path:" & srcDir(),
+                 "--passC:-I" & srcDir() / "repl", "--nimcache:" & work / "cache",
+                 "-d:ssl", "-o:" & outLib]
+  if release: nimCmd.add "-d:release"
+  nimCmd.add nimFile
+  let cmd = nimCmd.mapIt(quoteShell(it)).join(" ")
+  if verbose: echo "clonim: " & cmd
+  let (output, code) = execCmdEx(cmd)
+  if code != 0:
+    var e = newException(BuildError, "Nim backend failed")
+    e.output = output
+    raise e
+
+type ReplHost = object
+  exe: string
+  process: Process
+  commands, replies: File
+  loaded: seq[string]   ## libraries that ran, to rebuild state after a crash
+
+proc start(h: var ReplHost) =
+  ## The host gets a pipe each way on inherited descriptors; stdout and stderr
+  ## are the driver's own, so program output reaches the terminal directly.
+  var toHost, fromHost: array[0..1, cint]
+  if pipe(toHost) != 0 or pipe(fromHost) != 0:
+    raiseOSError(osLastError())
+  # Only the host may inherit its ends; keep ours out of later `nim c` runs.
+  discard fcntl(toHost[1], F_SETFD, FD_CLOEXEC)
+  discard fcntl(fromHost[0], F_SETFD, FD_CLOEXEC)
+  try:
+    h.process = startProcess(h.exe, args = [$toHost[0], $fromHost[1]],
+                             options = {poParentStreams})
+  finally:
+    discard close(toHost[0])
+    discard close(fromHost[1])
+  discard open(h.commands, FileHandle(toHost[1]), fmWrite)
+  discard open(h.replies, FileHandle(fromHost[0]), fmRead)
+
+proc stop(h: var ReplHost) =
+  if h.process == nil: return
+  h.commands.close
+  h.replies.close
+  discard h.process.waitForExit
+  h.process.close
+  h.process = nil
+
+proc send(h: var ReplHost, verb, lib: string): int =
+  ## The library's status, or -1 when the host died running it.
+  stdout.flushFile
+  try:
+    h.commands.writeLine(verb & " " & lib)
+    h.commands.flushFile
+    var reply: string
+    if h.replies.readLine(reply): return reply.parseInt
+  except IOError, ValueError: discard
+  -1
+
+proc eval(h: var ReplHost, lib: string): int =
+  ## Runs one input. If the host dies (a crash, or Ctrl-C during a long
+  ## evaluation), a new one replays the inputs that had run, output hidden.
+  # Ctrl-C reaches the whole foreground process group; only the host stops.
+  signal(SIGINT, SIG_IGN)
+  result = h.send("eval", lib)
+  signal(SIGINT, SIG_DFL)
+  if result == 0 or result == 1:
+    h.loaded.add lib
+  elif result < 0:
+    let code = h.process.waitForExit
+    h.stop
+    stderr.writeLine("clonim: evaluation " &
+      (if code == 128 + SIGINT.int or code == -SIGINT.int: "interrupted"
+       else: "crashed (exit code " & $code & ")") &
+      "; restarting and replaying " & $h.loaded.len & " earlier input(s)")
+    h.start
+    for earlier in h.loaded:
+      if h.send("quiet", earlier) < 0:
+        stderr.writeLine("clonim: replay failed; earlier definitions are lost")
+        h.stop
+        h.start
+        h.loaded = @[]
+        break
+
 proc repl(sourceRoots: seq[string], release, optimize, verbose: bool) =
-  ## clonim has no interpreter, so each input is compiled and run as a whole
-  ## program: every earlier successful input, a marker line, then the new
-  ## forms with each expression's value printed. Only output after the marker
-  ## is shown. Earlier inputs therefore run again on every evaluation, side
-  ## effects included; their output is hidden, but not their other effects.
-  let marker = "clonim-repl-" & $getCurrentProcessId() & "-" &
-               toHex(hash(epochTime()).uint32, 8)
-  let keyPath = getCurrentDir() / "<repl>"
-  var history: seq[string] = @[]
+  ## clonim has no interpreter, so each input is compiled to a shared library
+  ## and run by a long-lived host process that holds the runtime, and with it
+  ## every var earlier inputs defined. The compiler side keeps a matching
+  ## resolver, so inputs see earlier definitions, namespaces and macros.
+  let work = getTempDir() / "clonim" /
+             ("repl-" & toHex(hash(getCurrentDir()).uint32, 8) &
+              (if release: "-r" else: ""))
+  var host = ReplHost()
+  try:
+    host.exe = replHostExe(release)
+  except IOError, OSError:
+    stderr.writeLine("clonim: " & getCurrentExceptionMsg())
+    quit(1)
+  let libs = work / ("session-" & $getCurrentProcessId())
+  createDir(libs)
+  defer: removeDir(libs)
+  signal(SIGPIPE, SIG_IGN)   # a dead host must not take the driver with it
+  host.start
+  defer: host.stop
+
+  var resolver = newReplResolver(sourceRoots)
   var ns = "user"
+  var inputs = 0
   let interactive = isatty(stdin)
   if interactive:
-    echo "clonim REPL — each input is compiled to a native binary and run."
-    echo "Earlier inputs are replayed with their output hidden. :quit or Ctrl-D exits."
+    echo "clonim REPL — each input is compiled to a native library and run once."
+    echo ":quit or Ctrl-D exits."
     when not defined(windows):
       discard historySetMaxLen(1000)
       discard historyLoad(replHistoryFile().cstring)
@@ -325,20 +473,16 @@ proc repl(sourceRoots: seq[string], release, optimize, verbose: bool) =
       break
     if spans.len == 0: continue
 
-    var entry: seq[string] = @[]   # the input as it will be replayed
     var shown: seq[string] = @[]   # the input with each value printed
-    var bad = ""
     var newNs = ns
     for (form, span) in spans:
       let text = buf[span]
       let head = headSymbol(form)
-      entry.add text
       if head == "ns":
-        if history.len > 0 or entry.len > 1:
-          bad = "ns is only supported as the first REPL input"
-        elif form.items.len > 1 and form.items[1].kind == kSymbol:
+        if form.items.len > 1 and form.items[1].kind == kSymbol:
           newNs = form.items[1].s
         shown.add text
+        shown.add "(println \"nil\")"
       elif isDefinition(head):
         shown.add text
         let name =
@@ -350,36 +494,36 @@ proc repl(sourceRoots: seq[string], release, optimize, verbose: bool) =
         shown.add "(println " & cljStr(name) & ")"
       else:
         shown.add "(prn " & text & ")"
-    if bad.len > 0:
-      stderr.writeLine("clonim: " & bad)
-      continue
 
-    # An ns form has to open the program, so it goes before the marker.
-    let prefix = history & (if spans[0][0].headSymbol == "ns": @[shown[0]] else: @[])
-    let body = (if prefix.len > history.len: @["(println \"nil\")"] & shown[1 .. ^1]
-                else: shown)
-    let src = (prefix & @["(println " & cljStr(marker) & ")"] & body).join("\n")
+    # A failed resolve or build leaves the session as it was before the input.
+    let before = resolver.snapshot
     let t0 = epochTime()
-    var bin = ""
+    inc inputs
+    let lib = libs / ("input" & $inputs & ".so")
+    var tCompile = 0.0
     try:
-      let nimSrc = compileSource(src, sourceRoots)
-      bin = buildProgram(nimSrc, "repl", keyPath, true, release, optimize, verbose, "",
-                         epochTime() - t0)
+      let nimSrc = compileReplForms(resolver.resolveRepl(shown.join("\n"), ns))
+      tCompile = epochTime() - t0
+      buildReplInput(nimSrc, work, lib, release, optimize, verbose)
     except BuildError as e:
+      resolver = before
       stderr.writeLine("clonim: " & e.msg & "\n" & e.output)
       continue
     except CljError, IOError, OSError:
+      resolver = before
       stderr.writeLine("clonim: " & getCurrentExceptionMsg())
       continue
-    let (output, code) = execCmdEx(quoteShell(bin))
-    let at = output.find(marker & "\n")
-    stdout.write(if at >= 0: output[at + marker.len + 1 .. ^1] else: output)
-    stdout.flushFile
-    if code == 0:
-      history.add entry.join("\n")
-      ns = newNs
-    else:
-      stderr.writeLine("clonim: evaluation failed (exit code " & $code & ")")
+    let tBuild = epochTime() - t0 - tCompile
+    let t1 = epochTime()
+    let status = host.eval(lib)
+    if verbose:
+      stderr.writeLine("clonim: analyze " & (tCompile * 1000).formatFloat(ffDecimal, 1) &
+        "ms  nim " & (tBuild * 1000).formatFloat(ffDecimal, 1) &
+        "ms  eval " & ((epochTime() - t1) * 1000).formatFloat(ffDecimal, 1) & "ms")
+    # Forms that ran before an error keep their effects, as in Clojure, so the
+    # resolver keeps the input's definitions unless the host lost them.
+    if status in [0, 1]: ns = newNs
+    else: resolver = before
 
 proc main() =
   let argv = commandLineParams()

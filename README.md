@@ -16,11 +16,15 @@ nim c --hints:off -o:bin/clonim src/clonim.nim   # build the compiler
 ./bin/clonim repl                       # interactive REPL
 ```
 
-The REPL has no interpreter behind it: each input is compiled and run as a
-whole program made of every earlier successful input plus the new one, and
-only the new input's output and values are shown. Earlier inputs therefore run
-again on each evaluation (their output hidden), so side effects such as file
-writes repeat. An `ns` form is accepted only as the first input.
+The REPL has no interpreter behind it either: each input is compiled to a
+native shared library and loaded into a host process that stays up for the
+whole session (`src/repl_host.nim`). The host holds the runtime, so vars,
+atoms and other state persist between inputs, and each input runs exactly
+once. An input may start with an `ns` form to switch namespace. If the host
+dies — a crash, or Ctrl-C during a long evaluation — a new one silently
+replays the inputs that had run, so earlier definitions survive (and their
+side effects repeat). A source checkout builds the host into `lib/` on first
+use; release builds ship it beside the compiler.
 
 At a terminal, input goes through linenoise (bundled with Nim): lines can be
 edited, the arrow keys recall earlier lines, Ctrl-C discards the input so far
