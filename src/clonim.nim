@@ -8,7 +8,7 @@
 import std/[hashes, os, osproc, posix, sequtils, strutils, terminal, times]
 import runtime, reader, compiler, namespaces
 when not defined(windows):
-  import std/linenoise
+  import lineedit
 
 proc gitSha(): string {.compileTime.} =
   let (sha, code) = gorgeEx("git -C " & quoteShell(currentSourcePath().parentDir) &
@@ -253,29 +253,40 @@ proc isDefinition(head: string): bool =
 proc replHistoryFile(): string =
   getEnv("CLONIM_HISTORY", getHomeDir() / ".clonim_history")
 
-type ReplRead = enum rrLine, rrCancel, rrEof
+type
+  ReplRead = enum rrLine, rrCancel, rrEof
+  ReplInput = object
+    interactive: bool
+    when not defined(windows):
+      editor: LineEditor
 
-proc replReadLine(prompt: string, interactive: bool, line: var string): ReplRead =
-  ## One line of REPL input. At a terminal this goes through linenoise, so the
-  ## line can be edited and earlier lines recalled with the arrow keys; Ctrl-C
-  ## cancels the input so far and Ctrl-D on an empty line exits.
+proc replReadLine(input: var ReplInput, prompt: string, line: var string): ReplRead =
+  ## One line of REPL input. At a terminal this goes through a line editor
+  ## (src/lineedit.nim), so the line can be edited and earlier lines recalled
+  ## with the arrow keys; Ctrl-C cancels the input so far and Ctrl-D on an
+  ## empty line exits. A multi-line paste arrives whole.
   when not defined(windows):
-    if interactive:
-      var res: ReadLineResult
-      readLineStatus(prompt, res)
-      case res.status
-      of lnCtrlC: return rrCancel
-      of lnCtrlD: return rrEof
-      else: discard
-      line = res.line
+    if input.interactive:
+      case input.editor.readLine(prompt, line)
+      of esCtrlC: return rrCancel
+      of esCtrlD: return rrEof
+      of esLine: discard
       if line.strip.len > 0:
-        discard historyAdd(line.cstring)
-        discard historySave(replHistoryFile().cstring)
+        input.editor.addHistory(line)
+        input.editor.saveHistory(replHistoryFile())
       return rrLine
-  if interactive:
+  if input.interactive:
     stdout.write(prompt)
     stdout.flushFile
   if stdin.readLine(line): rrLine else: rrEof
+
+proc pastePending(input: ReplInput): bool =
+  ## Whether more lines of a paste are waiting: they belong to this input.
+  when not defined(windows): input.interactive and input.editor.hasPending
+  else: false
+
+proc discardPaste(input: var ReplInput) =
+  when not defined(windows): input.editor.discardPending
 
 proc replHostExe(release: bool): string =
   ## The REPL host (src/repl_host.nim): a runtime that stays up for the whole
@@ -434,13 +445,15 @@ proc repl(sourceRoots: seq[string], release, optimize, verbose: bool) =
   var resolver = newReplResolver(sourceRoots)
   var ns = "user"
   var inputs = 0
+  var cancelled = false   # the last read was a Ctrl-C: another one exits
   let interactive = isatty(stdin)
+  var input = ReplInput(interactive: interactive)
   if interactive:
     echo "clonim REPL — each input is compiled to a native library and run once."
-    echo ":quit or Ctrl-D exits."
+    echo ":quit, Ctrl-D or Ctrl-C twice exits."
     when not defined(windows):
-      discard historySetMaxLen(1000)
-      discard historyLoad(replHistoryFile().cstring)
+      input.editor = initLineEditor(maxHistory = 1000)
+      input.editor.loadHistory(replHistoryFile())
   while true:
     # Read lines until they hold complete forms.
     var buf = ""
@@ -449,24 +462,32 @@ proc repl(sourceRoots: seq[string], release, optimize, verbose: bool) =
     while true:
       let prompt = (if buf.len == 0: ns & "=> " else: " ".repeat(ns.len) & "   ")
       var line: string
-      case replReadLine(prompt, interactive, line)
+      case input.replReadLine(prompt, line)
       of rrEof:
         eof = true
         break
       of rrCancel:
+        if cancelled:
+          eof = true
+        else:
+          cancelled = true
+          echo "(Ctrl-C again to exit)"
         buf = ""
         break
-      of rrLine: discard
+      of rrLine: cancelled = false
       buf.add line & "\n"
       if buf.strip in [":quit", ":q", ":exit"]:
         eof = true
         break
       try:
         spans = readAllSpans(buf)
+        # A paste is one input, even when its first lines are complete forms.
+        if input.pastePending: continue
         break
       except CljError as e:
         if "EOF while reading" in e.msg: continue
         stderr.writeLine("clonim: " & e.msg)
+        input.discardPaste
         buf = ""
         break
     if eof:

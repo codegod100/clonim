@@ -26,10 +26,12 @@ replays the inputs that had run, so earlier definitions survive (and their
 side effects repeat). A source checkout builds the host into `lib/` on first
 use; release builds ship it beside the compiler.
 
-At a terminal, input goes through linenoise (bundled with Nim): lines can be
-edited, the arrow keys recall earlier lines, Ctrl-C discards the input so far
-and Ctrl-D on an empty line exits. History is kept in `~/.clonim_history`
-(override with `CLONIM_HISTORY`).
+At a terminal, input goes through a small line editor (`src/lineedit.nim`):
+lines can be edited, the arrow keys recall earlier lines, Ctrl-C discards the
+input so far (a second Ctrl-C in a row exits) and Ctrl-D on an empty line
+exits. Multi-line pastes work: with bracketed paste the whole block is read as
+one input, so its forms compile and run together. History is kept in
+`~/.clonim_history` (override with `CLONIM_HISTORY`).
 
 There is a `justfile` too: `just build`, `just test`, `just bench`,
 `just run <file>`, `just emit <file>`, `just accept` (re-record expectations).
