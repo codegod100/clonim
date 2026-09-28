@@ -29,8 +29,10 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # Pushes to main publish a rolling "release" prerelease; version tags
-      # publish a regular release. Each AppImage updates from its own channel.
+      # Pushes to main publish a rolling "release" release and version tags
+      # publish a versioned one. Both are marked as the repository's latest
+      # release and embed the "latest" update channel, because updaters such
+      # as Gear Lever resolve updates only through GitHub's /releases/latest.
       - name: Resolve release tag
         id: release
         env:
@@ -44,8 +46,7 @@ jobs:
             {
               echo "tag=release"
               echo "ref=$SHA"
-              echo "channel=release"
-              echo "prerelease=true"
+              echo "channel=latest"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -62,7 +63,6 @@ jobs:
             echo "tag=$tag"
             echo "ref=$tag"
             echo "channel=latest"
-            echo "prerelease=false"
           } >> "$GITHUB_OUTPUT"
 
       - name: Check out release ref
@@ -151,9 +151,9 @@ jobs:
           echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool-x86_64.AppImage" \
             | sha256sum --check
           chmod +x /tmp/appimagetool-x86_64.AppImage
-          # Embed update information so AppImageUpdate can fetch deltas from
-          # the newest release on this build's channel. appimagetool writes
-          # the .zsync file to the working directory, so run it from dist/.
+          # Embed update information so AppImageUpdate and Gear Lever can fetch
+          # GitHub's latest release. appimagetool writes the .zsync file to the
+          # working directory, so run it from dist/.
           update_info="gh-releases-zsync|${GITHUB_REPOSITORY_OWNER}|${GITHUB_REPOSITORY#*/}|${UPDATE_CHANNEL}|clonim-linux-x86_64.AppImage.zsync"
           (
             cd dist
@@ -196,8 +196,8 @@ jobs:
             The AppImage embeds update information, so it can be updated in
             place with AppImageUpdate (`appimageupdatetool clonim-linux-x86_64.AppImage`).
           draft: false
-          prerelease: ${{ steps.release.outputs.prerelease }}
-          make_latest: ${{ steps.release.outputs.prerelease == 'true' && 'false' || 'true' }}
+          prerelease: false
+          make_latest: true
           files: |
             dist/clonim-linux-x86_64.AppImage
             dist/clonim-linux-x86_64.AppImage.zsync
