@@ -27,6 +27,19 @@ jobs:
   release:
     name: Build and publish Linux x86_64
     runs-on: ubuntu-24.04
+    # examples/postgres.clj talks to this server
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      CLONIM_TEST_POSTGRES: postgresql://postgres:postgres@localhost:5432/postgres
 
     steps:
       # Pushes to main publish a rolling "release" release and version tags
@@ -83,7 +96,7 @@ jobs:
       - name: Install AppImage build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes file libpcre3 libsqlite3-0
+          sudo apt-get install --yes file libpcre3 libsqlite3-0 libpq5
 
       - name: Run test suite
         run: ./run-tests.sh

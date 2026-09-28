@@ -37,6 +37,11 @@ names=()
 for f in examples/*.clj; do
   name=$(basename "$f" .clj)
   [ -f "tests/$name.expected" ] || continue
+  # examples/postgres.clj needs a server to talk to
+  if [ "$name" = postgres ] && [ -z "${CLONIM_TEST_POSTGRES:-}" ]; then
+    echo "skip postgres (set CLONIM_TEST_POSTGRES to a connection URI to run it)"
+    continue
+  fi
   names+=("$name")
 done
 

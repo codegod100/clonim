@@ -26,6 +26,7 @@ when defined(releaseCompiler):
     EmbeddedRuntimeTypes = staticRead("runtime_types.nim")
     EmbeddedCoreStdlib = staticRead("../stdlib/clonim/core.clj")
     EmbeddedSqliteStdlib = staticRead("../stdlib/clonim/sqlite.clj")
+    EmbeddedPostgresStdlib = staticRead("../stdlib/clonim/postgres.clj")
     EmbeddedJavaIoStdlib = staticRead("../stdlib/clojure/java/io.clj")
     EmbeddedMvnHttpStdlib = staticRead("../stdlib/jolt/mvn_http.clj")
     EmbeddedReplNimbase = staticRead("repl/nimbase.h")
@@ -38,6 +39,7 @@ when defined(releaseCompiler):
     h = h !& hash(EmbeddedRuntimeTypes)
     h = h !& hash(EmbeddedCoreStdlib)
     h = h !& hash(EmbeddedSqliteStdlib)
+    h = h !& hash(EmbeddedPostgresStdlib)
     h = h !& hash(EmbeddedJavaIoStdlib)
     h = h !& hash(EmbeddedMvnHttpStdlib)
     h = h !& hash(EmbeddedReplNimbase)
@@ -47,6 +49,7 @@ when defined(releaseCompiler):
       (result / "src" / "runtime_types.nim", EmbeddedRuntimeTypes),
       (result / "stdlib" / "clonim" / "core.clj", EmbeddedCoreStdlib),
       (result / "stdlib" / "clonim" / "sqlite.clj", EmbeddedSqliteStdlib),
+      (result / "stdlib" / "clonim" / "postgres.clj", EmbeddedPostgresStdlib),
       (result / "stdlib" / "clojure" / "java" / "io.clj", EmbeddedJavaIoStdlib),
       (result / "stdlib" / "jolt" / "mvn_http.clj", EmbeddedMvnHttpStdlib),
       (result / "src" / "repl" / "nimbase.h", EmbeddedReplNimbase),

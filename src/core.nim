@@ -1,7 +1,7 @@
 ## clonim core — clojure.core builtins, registered into the global var table.
 import std/[algorithm, strutils, math, times, random, re, os, httpclient, sequtils, sets,
             tables]
-import runtime, reader, sqlite
+import runtime, reader, sqlite, postgres
 
 var selectedCore: HashSet[string]
 var selectingCore = false
@@ -1600,6 +1600,14 @@ proc registerCoreStateHost*() =
     quit(if a.len > 0: int(intOf(a[0])) else: 0)
   def "Thread/sleep", proc (a: openArray[Value]): Value =
     sleep(int(intOf(a[0]))); NilV
+  def "System/getenv", proc (a: openArray[Value]): Value =
+    ## One variable's value (nil if unset), or every variable as a map.
+    if a.len == 0:
+      var ps: seq[(Value, Value)] = @[]
+      for k, v in envPairs(): ps.add (mkStr(k), mkStr(v))
+      mkMap(ps)
+    elif existsEnv(sOf(a[0])): mkStr(getEnv(sOf(a[0])))
+    else: NilV
   def "System/currentTimeMillis", proc (a: openArray[Value]): Value =
     mkInt(int64(epochTime() * 1000))
   def "System/getProperty", proc (a: openArray[Value]): Value =
@@ -1628,6 +1636,34 @@ proc registerCoreStateHost*() =
   def "ex-info", proc (a: openArray[Value]): Value =
     exInfo(str(a[0]), (if a.len > 1: a[1] else: mkMapOf(emptyPMap())))
   def "time-ms", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))
+  def "*pg-connect*", proc (a: openArray[Value]): Value =
+    ## A PostgreSQL connection driven by keyword messages; see
+    ## src/postgres.nim and stdlib/clonim/postgres.clj. Errors from the
+    ## server are thrown as ex-info carrying {:pg/sqlstate "..." :sql "..."}.
+    template pgCall(body: untyped): untyped =
+      try: body
+      except PostgresError as e:
+        let data = mkMap(@[(mkKeyword("pg/sqlstate"), mkStr(e.sqlstate)),
+                           (mkKeyword("sql"), mkStr(e.sql))])
+        let msg = "PostgreSQL: " & e.msg
+        throwValue(msg, exInfo(msg, data))
+    let pg = pgCall(connectPg(sOf(a[0])))
+    mkFn("postgres", proc (args: openArray[Value]): Value =
+      if args.len == 0 or args[0].kind != kKeyword:
+        err("postgres connection expects a keyword message")
+      let params = (if args.len > 2 and args[2].kind != kNil: toSeq(args[2])
+                    else: @[])
+      case args[0].s
+      of "execute": pgCall(pg.execute(sOf(args[1]), params))
+      of "query": pgCall(pg.query(sOf(args[1]), params))
+      of "transaction": pgCall(pg.transaction(args[1]))
+      of "listen": pgCall((pg.listen(sOf(args[1])); NilV))
+      of "notifications":
+        pgCall(pg.notifications(if args.len > 1 and args[1].kind == kInt: int(args[1].i)
+                                else: -1))
+      of "reset": pgCall((pg.resetPg(); NilV))
+      of "close": pg.closePg(); NilV
+      else: err("Unknown postgres message: " & prStr(args[0])))
   def "*sqlite-open*", proc (a: openArray[Value]): Value =
     ## A database handle driven by keyword messages; see src/sqlite.nim and
     ## stdlib/clonim/sqlite.clj. SQLite's own errors are thrown as ex-info

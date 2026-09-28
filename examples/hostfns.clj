@@ -37,3 +37,7 @@
 (let [t0 (System/currentTimeMillis)]
   (Thread/sleep 20)
   (println (>= (- (System/currentTimeMillis) t0) 20)))              ; true
+
+;; environment
+(println (System/getenv "CLONIM_SURELY_UNSET") (string? (System/getenv "PATH"))
+         (map? (System/getenv)))                                    ; nil true true

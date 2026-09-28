@@ -90,6 +90,45 @@ Set `CLONIM_SQLITE_LIB` to load a specific library file.
 - **Locking:** a handle waits up to 5 s for another process's write lock
   before failing with `SQLITE_BUSY`.
 
+### PostgreSQL
+
+`clonim.postgres` connects through the `*pg-connect*` primitive. The runtime
+loads `libpq` on first use, like SQLite. Set `CLONIM_LIBPQ` to load a
+specific library file. The connection string is anything libpq accepts, so
+any provider works (TLS included).
+
+```clojure
+(require '[clonim.postgres :as pg])
+
+(def db (pg/connect (System/getenv "DATABASE_URL")))  ; postgresql://user:pass@host/db?sslmode=require
+(pg/execute! db "insert into log (tx) values ($1)" ["[:a 1]"])   ;=> {:changes 1}
+(pg/query db "select * from log where t > $1" [0])              ;=> [{:t 1, :tx "[:a 1]"}]
+(pg/transaction db (fn [] (pg/execute! db "delete from log") :done))
+
+(pg/listen db "events")
+(pg/notifications db 1000)   ; waits up to 1 s => [{:channel "events", :payload "...", :pid 42}]
+```
+
+- **Parameters:** placeholders are `$1`, `$2`, … and travel in text
+  format. `nil`, integers, floats, strings and booleans bind as
+  themselves. A byte array binds as `bytea`.
+- **Results:** rows come back as maps keyed by column-name keywords, typed
+  by column. Integers, floats and booleans come back as themselves, `bytea`
+  as unsigned bytes, and `numeric` as an integer or a float. Everything
+  else (text, json, timestamps) comes back as a string.
+- **Transactions:** `transaction` wraps `(f)` in `BEGIN`/`COMMIT`. If `f`
+  throws, it rolls back and rethrows.
+- **Notifications:** `notifications` returns the notifications received
+  on `listen`ed channels. If none have arrived, it waits for one in
+  `poll(2)` rather than looping.
+- **Errors:** server errors are `ex-info` with
+  `{:pg/sqlstate "23505" :sql "..."}`.
+- **Tests:** `examples/postgres.clj` runs only when `CLONIM_TEST_POSTGRES`
+  holds a connection URI.
+
+`System/getenv` reads the environment, for connection strings kept in
+secrets.
+
 ## Namespaces and libraries
 
 Each file may start with a namespace declaration:
