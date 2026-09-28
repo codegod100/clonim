@@ -69,8 +69,10 @@ current namespace rather than changing already-resolved core references.
 Libraries are loaded once, before their dependents. Namespace names map to paths
 with dots as separators and hyphens as underscores. Add search roots with the
 repeatable `--source-path <directory>` CLI option; these precede the working
-directory, input file's directory, and bundled `stdlib/`. Libraries are never
-loaded implicitly merely because their source root is available.
+directory's `src/` (searched when it exists, like the Clojure CLI's default
+`:paths ["src"]`), the working directory, input file's directory, and bundled
+`stdlib/`. Libraries are never loaded implicitly merely because their source
+root is available.
 
 This is a static subset: one leading `ns` per file, literal top-level `require`,
 `:as`, explicit `:refer`, and `defn-` privacy. Dynamic namespace operations,

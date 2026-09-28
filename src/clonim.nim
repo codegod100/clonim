@@ -63,7 +63,8 @@ usage:
 
 options:
   -o <path>   output binary path (build)
-  --source-path <path>  add a library source root (repeatable)
+  --source-path <path>  add a library source root (repeatable; ./src is
+                        always searched when it exists)
   -v          show the nim build command and timings
   -d          build with -d:release (default for build, off for run/repl)"""
   quit(1)
@@ -384,6 +385,10 @@ proc main() =
       optimize = true
     else: usage()
     inc i
+  # Like the Clojure CLI's default `:paths ["src"]`, the working directory's
+  # src/ is a source root without any flag, after the explicit ones.
+  if dirExists(getCurrentDir() / "src"):
+    sourceRoots.add getCurrentDir() / "src"
 
   if isRepl:
     # Source-level libraries are loaded only by an explicit require form.
