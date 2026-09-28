@@ -64,4 +64,15 @@ for name in "${names[@]}"; do
   cat "$out/$name"
   grep -q '^ok ' "$out/$name" || fail=1
 done
+
+# The REPL runs each input once in a long-lived host, so this checks what a
+# session keeps between inputs rather than a program's output.
+got=$("$clonim" repl < tests/repl_session.clj 2>&1)
+if [ "$got" = "$(cat tests/repl_session.expected)" ]; then
+  echo "ok   repl_session"
+else
+  echo "FAIL repl_session"
+  diff -u tests/repl_session.expected <(printf '%s\n' "$got") | head -20
+  fail=1
+fi
 exit $fail

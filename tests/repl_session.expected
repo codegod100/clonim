@@ -1,0 +1,27 @@
+#'user/hits
+#'user/hit!
+1
+2
+printed once
+nil
+2
+#'user/scale
+#'user/scaled
+10
+#'user/scale
+50
+nil
+#'user/ev?
+#'user/od?
+[true true]
+clonim: Index out of bounds: 1
+3
+clonim: Namespace error: unable to resolve symbol undefined-thing in user
+#'user/unless
+:yes
+#'user/xs
+(1 2 3)
+nil
+#'other/y
+nil
+5

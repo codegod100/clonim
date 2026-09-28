@@ -165,7 +165,7 @@ proc `=destroy`*(x: var ValueObj) =
     discard v
   draining = false
 
-let NilV* = Value(kind: kNil)
-let TrueV* = Value(kind: kBool, raw: 1)
-let FalseV* = Value(kind: kBool, raw: 0)
+template NilV*: Value = Value(kind: kNil)
+template TrueV*: Value = Value(kind: kBool, raw: 1)
+template FalseV*: Value = Value(kind: kBool, raw: 0)
 let emptyArgs*: array[0, Value] = []
