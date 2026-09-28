@@ -1,0 +1,13 @@
+{:changes 1, :last-insert-rowid 1}
+[{:id 1, :name "Ada", :age 36, :score 9.5} {:id 2, :name "Grace", :age nil, :score 8.25}]
+[{:photo (0 127 255 200)}]
+[{:n 2, :flag 1}]
+[]
+:committed
+[abort {:why :test}]
+[{:name "Ada", :age 37} {:name "Grace", :age nil}]
+[SQLite: no such table: nowhere {:sqlite/code 1, :sql select * from nowhere}]
+19
+SQLite statement takes 1 parameter(s), got 0: select ?
+SQLite database is closed: :memory:
+[{:t 1, :tx "[:db/add 1 :x 1]"}]

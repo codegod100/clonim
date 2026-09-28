@@ -1,7 +1,7 @@
 ## clonim core — clojure.core builtins, registered into the global var table.
 import std/[algorithm, strutils, math, times, random, re, os, httpclient, sequtils, sets,
             tables]
-import runtime, reader
+import runtime, reader, sqlite
 
 var selectedCore: HashSet[string]
 var selectingCore = false
@@ -1626,6 +1626,30 @@ proc registerCoreStateHost*() =
   def "ex-info", proc (a: openArray[Value]): Value =
     exInfo(str(a[0]), (if a.len > 1: a[1] else: mkMapOf(emptyPMap())))
   def "time-ms", proc (a: openArray[Value]): Value = mkInt(int64(epochTime() * 1000))
+  def "*sqlite-open*", proc (a: openArray[Value]): Value =
+    ## A database handle driven by keyword messages; see src/sqlite.nim and
+    ## stdlib/clonim/sqlite.clj. SQLite's own errors are thrown as ex-info
+    ## carrying {:sqlite/code n :sql "..."}.
+    template sqliteCall(body: untyped): untyped =
+      try: body
+      except SqliteError as e:
+        let data = mkMap(@[(mkKeyword("sqlite/code"), mkInt(int64(e.code))),
+                           (mkKeyword("sql"), mkStr(e.sql))])
+        let msg = "SQLite: " & e.msg
+        throwValue(msg, exInfo(msg, data))
+    let db = sqliteCall(openDb(sOf(a[0])))
+    mkFn("sqlite", proc (args: openArray[Value]): Value =
+      if args.len == 0 or args[0].kind != kKeyword:
+        err("sqlite handle expects a keyword message")
+      let params = (if args.len > 2 and args[2].kind != kNil: toSeq(args[2])
+                    else: @[])
+      case args[0].s
+      of "execute": sqliteCall(db.execute(sOf(args[1]), params))
+      of "query": sqliteCall(db.query(sOf(args[1]), params))
+      of "transaction": sqliteCall(db.transaction(args[1]))
+      of "close": sqliteCall((db.closeDb(); NilV))
+      of "path": mkStr(db.path)
+      else: err("Unknown sqlite message: " & prStr(args[0])))
 
 proc aliasSelectedCore(names: openArray[string]) =
   for name in names:

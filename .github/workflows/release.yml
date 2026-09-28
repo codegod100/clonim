@@ -83,7 +83,7 @@ jobs:
       - name: Install AppImage build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes file libpcre3
+          sudo apt-get install --yes file libpcre3 libsqlite3-0
 
       - name: Run test suite
         run: ./run-tests.sh

@@ -25,6 +25,7 @@ when defined(releaseCompiler):
     EmbeddedAppRuntime = staticRead("app_runtime.nim")
     EmbeddedRuntimeTypes = staticRead("runtime_types.nim")
     EmbeddedCoreStdlib = staticRead("../stdlib/clonim/core.clj")
+    EmbeddedSqliteStdlib = staticRead("../stdlib/clonim/sqlite.clj")
     EmbeddedJavaIoStdlib = staticRead("../stdlib/clojure/java/io.clj")
     EmbeddedMvnHttpStdlib = staticRead("../stdlib/jolt/mvn_http.clj")
     EmbeddedReplNimbase = staticRead("repl/nimbase.h")
@@ -36,6 +37,7 @@ when defined(releaseCompiler):
     var h: Hash = hash(EmbeddedAppRuntime)
     h = h !& hash(EmbeddedRuntimeTypes)
     h = h !& hash(EmbeddedCoreStdlib)
+    h = h !& hash(EmbeddedSqliteStdlib)
     h = h !& hash(EmbeddedJavaIoStdlib)
     h = h !& hash(EmbeddedMvnHttpStdlib)
     h = h !& hash(EmbeddedReplNimbase)
@@ -44,6 +46,7 @@ when defined(releaseCompiler):
       (result / "src" / "app_runtime.nim", EmbeddedAppRuntime),
       (result / "src" / "runtime_types.nim", EmbeddedRuntimeTypes),
       (result / "stdlib" / "clonim" / "core.clj", EmbeddedCoreStdlib),
+      (result / "stdlib" / "clonim" / "sqlite.clj", EmbeddedSqliteStdlib),
       (result / "stdlib" / "clojure" / "java" / "io.clj", EmbeddedJavaIoStdlib),
       (result / "stdlib" / "jolt" / "mvn_http.clj", EmbeddedMvnHttpStdlib),
       (result / "src" / "repl" / "nimbase.h", EmbeddedReplNimbase),

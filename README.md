@@ -57,6 +57,39 @@ Source-level libraries are loaded explicitly. Use
 `(require '[clonim.core :refer [now-ms]])` to load `stdlib/clonim/core.clj`. Host-dependent operations remain small runtime primitives; for
 example, the stdlib `now-ms` function wraps the `*epoch-time-ms*` primitive.
 
+### SQLite
+
+`clonim.sqlite` opens SQLite databases through the `*sqlite-open*` primitive.
+The runtime loads `libsqlite3` on first use, the way `-d:ssl` loads OpenSSL.
+Programs that don't use SQLite neither link against it nor need it installed.
+Set `CLONIM_SQLITE_LIB` to load a specific library file.
+
+```clojure
+(require '[clonim.sqlite :as sql])
+
+(def db (sql/open "app.db"))              ; or ":memory:"
+(sql/execute! db "create table if not exists log (t integer primary key, tx text)")
+(sql/execute! db "insert into log (tx) values (?)" ["[:a 1]"])
+;=> {:changes 1, :last-insert-rowid 1}
+(sql/query db "select * from log where t > ?" [0])
+;=> [{:t 1, :tx "[:a 1]"}]
+(sql/transaction db (fn [] (sql/execute! db "delete from log") :done))
+(sql/close db)                            ; or use with-open
+```
+
+- **Parameters:** `nil`, integers, floats and strings bind as themselves.
+  Booleans bind as 1 and 0. A byte array, or any sequence of integers, binds
+  as a blob.
+- **Results:** rows come back as maps keyed by column-name keywords. Blobs
+  are sequences of unsigned bytes.
+- **Scripts:** `execute!` without parameters runs every statement in its
+  string.
+- **Transactions:** `transaction` runs `(f)` between `BEGIN IMMEDIATE` and
+  `COMMIT`. If `f` throws, it rolls back and rethrows.
+- **Errors:** SQLite errors are `ex-info` with `{:sqlite/code n :sql "..."}`.
+- **Locking:** a handle waits up to 5 s for another process's write lock
+  before failing with `SQLITE_BUSY`.
+
 ## Namespaces and libraries
 
 Each file may start with a namespace declaration:
